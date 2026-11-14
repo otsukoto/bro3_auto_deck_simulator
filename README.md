@@ -7,8 +7,8 @@
 単騎と北伐がややこしいので参考になるデッキ構成が作れるかもしれません。
 
 
-<img width="1308" height="1221" alt="c5c1b5dc4080ca5570cf49326bddf174" src="https://github.com/user-attachments/assets/5638e525-e461-4b83-b983-c4f021fa9c38" />
 <img width="1300" height="1230" alt="1fd9c24e86cca7d2d5be337f7e30464e" src="https://github.com/user-attachments/assets/0aa1b9ea-fcca-4a4b-a5f1-d5813abac1d1" />
+<img width="1308" height="1221" alt="c5c1b5dc4080ca5570cf49326bddf174" src="https://github.com/user-attachments/assets/5638e525-e461-4b83-b983-c4f021fa9c38" />
 
 
 
