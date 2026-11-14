@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="ja" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ブラウザ三国志 統合デッキシミュレータ (引率 ＆ 単騎 ＆ 防御 ＆ 北伐)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = { darkMode: 'class', theme: { extend: { colors: { sangoku: { gold: '#dfb248', dark: '#121318', cardBg: '#1c1e26', cardBorder: '#2e3240', sl: '#9333ea', l: '#fbbf24', ur: '#3b82f6', sr: '#f97316', r: '#ef4444', uc: '#06b6d4', c: '#eab308' } } } } }
+    </script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Noto Sans JP', sans-serif; background-color: #0d0e12; color: #e2e8f0; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #121318; }
+        ::-webkit-scrollbar-thumb { background: #2e3240; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #dfb248; }
+
+        .rarity-SL { border-color: #9333ea; background: linear-gradient(135deg, rgba(147,51,234,0.22) 0%, rgba(18,19,24,0.95) 100%); }
+        .rarity-L  { border-color: #fbbf24; background: linear-gradient(135deg, rgba(251,191,36,0.22) 0%, rgba(18,19,24,0.95) 100%); }
+        .rarity-UR { border-color: #3b82f6; background: linear-gradient(135deg, rgba(59,130,246,0.22) 0%, rgba(18,19,24,0.95) 100%); }
+        .rarity-SR { border-color: #f97316; background: linear-gradient(135deg, rgba(249,115,22,0.22) 0%, rgba(18,19,24,0.95) 100%); }
+        .rarity-R  { border-color: #ef4444; background: linear-gradient(135deg, rgba(239,68,68,0.22) 0%, rgba(18,19,24,0.95) 100%); }
+        .rarity-UC { border-color: #06b6d4; background: linear-gradient(135deg, rgba(6,182,212,0.22) 0%, rgba(18,19,24,0.95) 100%); }
+        .rarity-C  { border-color: #eab308; background: linear-gradient(135deg, rgba(234,179,8,0.22) 0%, rgba(18,19,24,0.95) 100%); }
+
+        .badge-SL { background-color: #9333ea; color: white; }
+        .badge-L  { background-color: #fbbf24; color: black; font-weight: 800; }
+        .badge-UR { background-color: #3b82f6; color: white; }
+        .badge-SR { background-color: #f97316; color: white; }
+        .badge-R  { background-color: #ef4444; color: white; }
+        .badge-UC { background-color: #06b6d4; color: black; font-weight: 800; }
+        .badge-C  { background-color: #eab308; color: black; font-weight: 800; }
+
+        @keyframes pulseFlash { 0% { opacity: 0.6; } 100% { opacity: 1; } }
+        .animate-flash { animation: pulseFlash 0.25s ease-out; }
+
+        @keyframes teisenShine {
+            0%, 100% { box-shadow: 0 0 6px rgba(52, 211, 153, 0.8), 0 0 12px rgba(45, 212, 191, 0.4); }
+            50% { box-shadow: 0 0 12px rgba(52, 211, 153, 1), 0 0 20px rgba(6, 182, 212, 0.8); }
+        }
+        .badge-teisen-cost { animation: teisenShine 2s infinite ease-in-out; }
+        .card-excluded { filter: grayscale(0.9) opacity(0.45); border-style: dashed !important; border-color: #ef4444 !important; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+    <!-- 共通ヘッダー -->
+    <header class="bg-sangoku-dark border-b border-sangoku-cardBorder sticky top-0 z-50 shadow-lg">
+        <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap justify-between items-center gap-3">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-amber-500 via-red-600 to-purple-700 flex items-center justify-center text-white shadow-md">
+                    <i class="fa-solid fa-dragon text-xl"></i>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold tracking-wide text-sangoku-gold">ブラウザ三国志</h1>
+                    <p class="text-xs text-gray-400">統合デッキ最適化シミュレータ (単騎 ＆ 引率 ＆ 防御 ＆ 北伐)</p>
+                </div>
+            </div>
+
+            <!-- 画像通信保護・ローカルキャッシュコントロール -->
+            <div class="flex flex-wrap items-center gap-2 bg-black/50 border border-gray-800 px-2.5 py-1.5 rounded-xl">
+                <div class="flex items-center space-x-1 bg-gray-900 p-0.5 rounded-lg border border-gray-700">
+                    <button type="button" id="btnImgModeAuto" onclick="SharedUI.setImgLoadMode('AUTO')" class="px-2.5 py-1 text-[11px] font-bold rounded-md bg-emerald-600 text-white shadow cursor-pointer transition" title="まずimg/フォルダを探し、無い画像だけ2並列・0.35秒間隔でゆっくり取得します">
+                        <i class="fa-solid fa-shield-heart mr-1"></i>img/優先＋低負荷
+                    </button>
+                    <button type="button" id="btnImgModeOffline" onclick="SharedUI.setImgLoadMode('OFFLINE')" class="px-2.5 py-1 text-[11px] font-bold rounded-md text-gray-400 hover:text-white cursor-pointer transition" title="サーバーへの画像アクセスを完全に遮断し、img/フォルダ内の画像のみ表示します">
+                        <i class="fa-solid fa-lock mr-1"></i>完全オフライン(img/のみ)
+                    </button>
+                </div>
+                <span id="imgQueueStatusBadge" class="text-[10px] font-mono text-emerald-400 px-1">img/優先・待機中</span>
+                <button type="button" onclick="SharedUI.downloadSafeImageScript()" class="bg-sky-900/70 hover:bg-sky-800 text-sky-200 border border-sky-500/40 text-[11px] font-bold px-2.5 py-1 rounded-lg transition cursor-pointer flex items-center space-x-1" title="手持ちカードの画像を安全にimg/フォルダへ一括保存するリストを生成します">
+                    <i class="fa-solid fa-download"></i>
+                    <span>画像リスト保存(.txt)</span>
+                </button>
+            </div>
+
+            <div class="flex items-center space-x-2">
+                <label class="cursor-pointer bg-gradient-to-r from-amber-600 to-red-600 hover:from-amber-500 hover:to-red-500 text-white text-xs font-bold px-4 py-2 rounded-lg shadow-md transition flex items-center space-x-2">
+                    <i class="fa-solid fa-file-import"></i>
+                    <span>JSON読込</span>
+                    <input type="file" accept=".json" class="hidden" onchange="if(this.files && this.files.length>0){ AppCards.processFile(this.files[0]); this.value=''; }">
+                </label>
+                <button id="demoDataBtn" class="bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs font-semibold px-3 py-2 rounded-lg border border-gray-700 transition cursor-pointer">
+                    デモデータ
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-grow max-w-7xl w-full mx-auto px-4 py-6">
+        <!-- ドロップゾーン -->
+        <label id="uploadDropZone" class="block mb-8 p-8 border-2 border-dashed border-amber-500/40 hover:border-amber-500 rounded-2xl bg-sangoku-cardBg/50 text-center transition cursor-pointer relative overflow-hidden group">
+            <input type="file" accept=".json" class="hidden" onchange="if(this.files && this.files.length>0){ AppCards.processFile(this.files[0]); this.value=''; }">
+            <div class="space-y-4 pointer-events-none">
+                <div class="w-16 h-16 mx-auto rounded-full bg-amber-500/10 text-sangoku-gold flex items-center justify-center text-2xl group-hover:scale-110 transition">
+                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                </div>
+                <div>
+                    <h3 class="text-lg font-bold text-white mb-1">`3gokushi_all_cards.json` をドロップ</h3>
+                    <p class="text-sm text-gray-400">または クリックしてファイルを選択してください（サーバー保護のため画像は `img/` 優先＆低負荷取得されます）</p>
+                </div>
+            </div>
+        </label>
+
+        <!-- 進行ログバー -->
+        <div id="statusLogBar" class="hidden bg-gray-900 border border-gray-800 p-3 rounded-xl text-xs font-mono text-gray-300 flex items-center justify-between mb-4">
+            <div class="flex items-center space-x-2">
+                <span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span id="statusLogText">待機中...</span>
+            </div>
+            <div id="errorAlertBox" class="hidden text-red-400 font-bold bg-red-950/80 px-2.5 py-1 rounded border border-red-500/50"></div>
+        </div>
+
+        <div id="appContent" class="hidden space-y-6">
+            <!-- 共通スタッツ表示 -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="bg-sangoku-cardBg border border-sangoku-cardBorder p-4 rounded-xl shadow-md flex items-center space-x-4">
+                    <div class="w-12 h-12 rounded-lg bg-amber-500/10 text-sangoku-gold flex items-center justify-center text-xl"><i class="fa-solid fa-cards-blank"></i></div>
+                    <div><div class="text-xs text-gray-400 font-semibold">所持カード数</div><div id="statTotalCards" class="text-2xl font-bold text-white">0</div></div>
+                </div>
+                <div class="bg-sangoku-cardBg border border-sangoku-cardBorder p-4 rounded-xl shadow-md flex items-center space-x-4">
+                    <div class="w-12 h-12 rounded-lg bg-red-500/10 text-red-400 flex items-center justify-center text-xl"><i class="fa-solid fa-gem"></i></div>
+                    <div><div class="text-xs text-gray-400 font-semibold">最高レア (SL/L/UR)</div><div id="statHighRarity" class="text-2xl font-bold text-white">0</div></div>
+                </div>
+                <div class="bg-sangoku-cardBg border border-sangoku-cardBorder p-4 rounded-xl shadow-md flex items-center space-x-4">
+                    <div class="w-12 h-12 rounded-lg bg-blue-500/10 text-blue-400 flex items-center justify-center text-xl"><i class="fa-solid fa-bolt"></i></div>
+                    <div><div class="text-xs text-gray-400 font-semibold">最大素攻</div><div id="statMaxAttack" class="text-2xl font-bold text-white">0</div></div>
+                </div>
+                <div class="bg-sangoku-cardBg border border-sangoku-cardBorder p-4 rounded-xl shadow-md flex items-center space-x-4">
+                    <div class="w-12 h-12 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center text-xl"><i class="fa-solid fa-coins"></i></div>
+                    <div><div class="text-xs text-gray-400 font-semibold">平均コスト</div><div id="statAvgCost" class="text-2xl font-bold text-white">0.0</div></div>
+                </div>
+            </div>
+
+            <!-- モード切替タブバー -->
+            <div class="flex flex-wrap border-b border-sangoku-cardBorder space-x-2">
+                <button class="nav-tab active px-5 py-3 text-sm font-bold border-b-2 border-red-500 text-red-400 transition flex items-center space-x-2 cursor-pointer" data-tab="solo">
+                    <i class="fa-solid fa-person-running"></i><span>単騎火力 最適化</span>
+                </button>
+                <button class="nav-tab px-5 py-3 text-sm font-bold border-b-2 border-transparent text-gray-400 hover:text-gray-200 transition flex items-center space-x-2 cursor-pointer" data-tab="lead">
+                    <i class="fa-solid fa-users-rays"></i><span>引率火力 最適化</span>
+                </button>
+                <button class="nav-tab px-5 py-3 text-sm font-bold border-b-2 border-transparent text-gray-400 hover:text-gray-200 transition flex items-center space-x-2 cursor-pointer" data-tab="def">
+                    <i class="fa-solid fa-shield-halved"></i><span>防御火力 最適化</span>
+                </button>
+                <button class="nav-tab px-5 py-3 text-sm font-bold border-b-2 border-transparent text-gray-400 hover:text-gray-200 transition flex items-center space-x-2 cursor-pointer" data-tab="hokubatsu">
+                    <i class="fa-solid fa-flag"></i><span>北伐 最適化</span>
+                </button>
+                <button class="nav-tab px-5 py-3 text-sm font-bold border-b-2 border-transparent text-gray-400 hover:text-gray-200 transition flex items-center space-x-2 cursor-pointer" data-tab="list">
+                    <i class="fa-solid fa-list-ul"></i><span>カード図鑑・検索</span>
+                </button>
+            </div>
+
+            <!-- 1. 単騎火力 最適化タブ -->
+            <div id="tab-solo" class="tab-content space-y-6">
+                <div class="bg-sangoku-cardBg border border-sangoku-cardBorder p-5 rounded-2xl shadow-md">
+                    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <h2 class="text-base font-bold text-white flex items-center space-x-2">
+                                <i class="fa-solid fa-sliders text-red-400"></i><span>単騎シミュレーション条件</span>
+                            </h2>
+                            <span class="text-xs bg-red-950/80 border border-red-500/50 text-red-300 px-2.5 py-0.5 rounded font-bold">武将単体出撃 (兵士0)</span>
+                            <div id="soloExcludedInfoBadge" class="hidden text-xs bg-red-950/70 border border-red-500/50 text-red-300 px-2.5 py-0.5 rounded-lg flex items-center space-x-2">
+                                <span>除外中: <b id="soloExcludedCountText">0</b>名</span>
+                                <button type="button" onclick="AppCards.clearExcludedCards()" class="underline text-red-400 hover:text-white font-bold cursor-pointer">解除</button>
+                            </div>
+                        </div>
+                        <button type="button" onclick="SoloEngine.run(true)" class="bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow transition flex items-center space-x-1.5 cursor-pointer">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i><span>全拠点の天候を自動最適化</span>
+                        </button>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">出兵元 (エース配置拠点)</label>
+                            <select id="soloAttackOrigin" onchange="SoloEngine.run(true)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-2 text-sm text-amber-400 font-bold cursor-pointer">
+                                <option value="HONKYO">本拠・塔 から出撃</option>
+                                <option value="KYOTEN" selected>拠点＋ から出撃</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">コスト上限配分 (本拠 / 拠点)</label>
+                            <select id="soloCostDist" onchange="SoloEngine.run(true)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-2 text-sm text-white cursor-pointer font-mono">
+                                <option value="30-25">本拠: 30.0 / 拠点: 25.0</option>
+                                <option value="25-30" selected>本拠: 25.0 / 拠点: 30.0</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">副将の配置設定</label>
+                            <select id="soloAdjutantMode" onchange="SoloEngine.changeAdjutantMode(this.value)" class="w-full bg-sangoku-dark border border-purple-500/40 rounded-lg px-2.5 py-2 text-xs text-white cursor-pointer font-bold focus:border-purple-400">
+                                <option value="CURRENT">① 現在の副将のまま計算 (手計算一致)</option>
+                                <option value="FILL_EMPTY">② 空き枠にのみ副将を追加</option>
+                                <option value="REASSIGN_ALL" selected>③ 副将を最適に再配分 (副将専用スキル満杯アサイン)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="mb-4 pt-3 border-t border-gray-800">
+                        <label class="block text-xs font-semibold text-gray-400 mb-1.5 flex items-center justify-between">
+                            <span><i class="fa-solid fa-khanda text-amber-400 mr-1"></i>単騎エース兵科指定 <span class="text-[11px] text-gray-500 font-normal">（初期表示は最高火力の兵科を自動選択）</span></span>
+                            <span id="labelSoloSoldierStatus" class="text-[11px] text-amber-300 font-bold">自動判定中...</span>
+                        </label>
+                        <div class="grid grid-cols-4 sm:grid-cols-7 gap-1.5 p-1 bg-sangoku-dark rounded-xl border border-sangoku-cardBorder">
+                            <button type="button" id="btnSoloSoldier_HAMMER" onclick="SoloEngine.setSoldierFilter('HAMMER')" class="py-1.5 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">錘兵</button>
+                            <button type="button" id="btnSoloSoldier_DOUBLE" onclick="SoloEngine.setSoldierFilter('DOUBLE')" class="py-1.5 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">双兵</button>
+                            <button type="button" id="btnSoloSoldier_AXE" onclick="SoloEngine.setSoldierFilter('AXE')" class="py-1.5 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">斧兵</button>
+                            <button type="button" id="btnSoloSoldier_BOW" onclick="SoloEngine.setSoldierFilter('BOW')" class="py-1.5 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">弓兵</button>
+                            <button type="button" id="btnSoloSoldier_SPEAR" onclick="SoloEngine.setSoldierFilter('SPEAR')" class="py-1.5 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">槍兵</button>
+                            <button type="button" id="btnSoloSoldier_CAV" onclick="SoloEngine.setSoldierFilter('CAV')" class="py-1.5 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">騎兵</button>
+                            <button type="button" id="btnSoloSoldier_SWORD" onclick="SoloEngine.setSoldierFilter('SWORD')" class="py-1.5 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">剣兵</button>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-3 border-t border-gray-800">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1.5 flex items-center justify-between">
+                                <span><i class="fa-solid fa-gem text-red-400 mr-1"></i>攻撃力10%UP (課金)</span>
+                                <span id="labelSoloBuff10Status" class="text-[11px] text-gray-400 font-mono">OFF (×1.0)</span>
+                            </label>
+                            <div class="grid grid-cols-2 gap-1.5 p-1 bg-sangoku-dark rounded-xl border border-sangoku-cardBorder">
+                                <button type="button" id="btnSoloBuff10Off" onclick="SoloEngine.setBuff10(false)" class="py-1 text-xs font-bold rounded-lg transition bg-gray-700 text-white shadow cursor-pointer">OFF</button>
+                                <button type="button" id="btnSoloBuff10On" onclick="SoloEngine.setBuff10(true)" class="py-1 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">ON (+10%)</button>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1.5 flex items-center justify-between">
+                                <span><i class="fa-solid fa-users text-cyan-400 mr-1"></i>伍・号令スキル</span>
+                                <span id="labelSoloGoStatus" class="text-[11px] text-cyan-400 font-mono font-bold">ON (+7000%)</span>
+                            </label>
+                            <div class="flex items-center space-x-1.5 p-1 bg-sangoku-dark rounded-xl border border-sangoku-cardBorder">
+                                <div class="grid grid-cols-2 gap-1 w-24">
+                                    <button type="button" id="btnSoloGoOff" onclick="SoloEngine.setGoEnabled(false)" class="py-1 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">OFF</button>
+                                    <button type="button" id="btnSoloGoOn" onclick="SoloEngine.setGoEnabled(true)" class="py-1 text-xs font-bold rounded-lg transition bg-cyan-600 text-white shadow cursor-pointer">ON</button>
+                                </div>
+                                <div class="flex-1 flex items-center justify-end space-x-1 pr-1">
+                                    <input type="number" id="optSoloGoBuff" value="7000" min="0" step="50" oninput="SoloEngine.updateGoBuff(this.value)" class="w-16 bg-black/60 border border-gray-700 rounded-lg px-1.5 py-0.5 text-xs text-amber-300 font-mono font-bold text-right focus:border-cyan-400 focus:outline-none">
+                                    <span class="text-xs text-gray-400 font-bold">%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex justify-between items-center pt-3 mt-3 border-t border-gray-800">
+                        <div class="text-[11px] text-gray-400">
+                            <i class="fa-solid fa-calculator text-red-400 mr-1"></i>内政官は「防:」のみ選出。帝仙鏡100%コピー、覚醒前素値参照、主将明鏡レベル別コピーを完全適用。
+                        </div>
+                        <button onclick="SoloEngine.run(true)" class="bg-gradient-to-r from-red-600 to-amber-600 hover:from-red-500 hover:to-amber-500 text-white font-bold text-sm px-8 py-2 rounded-xl shadow-lg transition flex items-center space-x-2 cursor-pointer">
+                            <i class="fa-solid fa-calculator"></i><span>単騎火力を再計算する</span>
+                        </button>
+                    </div>
+                </div>
+                <div id="soloDeckResultArea" class="space-y-6"></div>
+            </div>
+
+            <!-- 2. 引率火力 最適化タブ -->
+            <div id="tab-lead" class="tab-content hidden space-y-6">
+                <div class="bg-sangoku-cardBg border border-sangoku-cardBorder p-5 rounded-2xl shadow-md">
+                    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <h2 class="text-base font-bold text-white flex items-center space-x-2">
+                                <i class="fa-solid fa-sliders text-amber-400"></i><span>引率シミュレーション条件</span>
+                            </h2>
+                            <span class="text-xs bg-amber-950/80 border border-amber-500/50 text-amber-300 px-2.5 py-0.5 rounded font-bold">兵士引率出撃</span>
+                            <div id="leadExcludedInfoBadge" class="hidden text-xs bg-red-950/70 border border-red-500/50 text-red-300 px-2.5 py-0.5 rounded-lg flex items-center space-x-2">
+                                <span>除外中: <b id="leadExcludedCountText">0</b>名</span>
+                                <button type="button" onclick="AppCards.clearExcludedCards()" class="underline text-red-400 hover:text-white font-bold cursor-pointer">解除</button>
+                            </div>
+                        </div>
+                        <button type="button" onclick="LeadEngine.run(true)" class="bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow transition flex items-center space-x-1.5 cursor-pointer">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i><span>全拠点の天候を自動最適化</span>
+                        </button>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">出兵元 (エース配置拠点)</label>
+                            <select id="leadAttackOrigin" onchange="LeadEngine.run(true)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-2 text-sm text-amber-400 font-bold cursor-pointer">
+                                <option value="HONKYO">本拠・塔 から出撃</option>
+                                <option value="KYOTEN" selected>拠点＋ から出撃</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">引率する兵種</label>
+                            <select id="leadTroop" onchange="LeadEngine.run(true)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-2 text-sm text-white cursor-pointer font-bold">
+                                <option value="HEAVY_BOW" selected>重装弓兵 (天兵 / 素攻 286)</option>
+                                <option value="HEAVY_SPEAR">重装槍兵 (天兵 / 素攻 262)</option>
+                                <option value="HEAVY_CAV">重装騎兵 (天兵 / 素攻 253)</option>
+                                <option value="AXE">戦斧兵 (鋭兵 / 素攻 142)</option>
+                                <option value="TWIN">双剣兵 (鋭兵 / 素攻 105)</option>
+                                <option value="HAMMER">大錘兵 (鋭兵 / 素攻 185)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">引率する兵数</label>
+                            <input type="number" id="leadTroopCount" value="160000" min="0" step="1000" oninput="LeadEngine.run(false)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-2 text-sm text-white font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">コスト上限配分 (本拠 / 拠点)</label>
+                            <select id="leadCostDist" onchange="LeadEngine.run(true)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-2 text-sm text-white cursor-pointer font-mono">
+                                <option value="30-25">本拠: 30.0 / 拠点: 25.0</option>
+                                <option value="25-30" selected>本拠: 25.0 / 拠点: 30.0</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 pt-3 border-t border-gray-800">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1.5">副将の配置設定</label>
+                            <select id="leadAdjutantMode" onchange="LeadEngine.changeAdjutantMode(this.value)" class="w-full bg-sangoku-dark border border-purple-500/40 rounded-lg px-2.5 py-1.5 text-xs text-white cursor-pointer font-bold focus:border-purple-400">
+                                <option value="CURRENT">① 現在の副将のまま計算 (手計算一致)</option>
+                                <option value="FILL_EMPTY">② 空き枠にのみ副将を追加</option>
+                                <option value="REASSIGN_ALL" selected>③ 副将を最適に再配分</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1.5 flex items-center justify-between">
+                                <span><i class="fa-solid fa-mountain text-amber-500 mr-1"></i>出兵元の標高</span>
+                                <span id="labelLeadAltStatus" class="text-[11px] text-gray-400 font-mono">等倍 (×1.0)</span>
+                            </label>
+                            <div class="grid grid-cols-2 gap-1.5 p-1 bg-sangoku-dark rounded-xl border border-sangoku-cardBorder">
+                                <button type="button" id="btnLeadAltNormal" onclick="LeadEngine.setAltitude(false)" class="py-1 text-xs font-bold rounded-lg transition bg-gray-700 text-white shadow">平地・低地</button>
+                                <button type="button" id="btnLeadAltHigh" onclick="LeadEngine.setAltitude(true)" class="py-1 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white">高地 (1.2倍)</button>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1.5 flex items-center justify-between">
+                                <span><i class="fa-solid fa-gem text-red-400 mr-1"></i>攻撃力10%UP (課金)</span>
+                                <span id="labelLeadBuff10Status" class="text-[11px] text-gray-400 font-mono">OFF (×1.0)</span>
+                            </label>
+                            <div class="grid grid-cols-2 gap-1.5 p-1 bg-sangoku-dark rounded-xl border border-sangoku-cardBorder">
+                                <button type="button" id="btnLeadBuff10Off" onclick="LeadEngine.setBuff10(false)" class="py-1 text-xs font-bold rounded-lg transition bg-gray-700 text-white shadow">OFF</button>
+                                <button type="button" id="btnLeadBuff10On" onclick="LeadEngine.setBuff10(true)" class="py-1 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white">ON (+10%)</button>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1.5 flex items-center justify-between">
+                                <span><i class="fa-solid fa-users text-cyan-400 mr-1"></i>伍・号令スキル</span>
+                                <span id="labelLeadGoStatus" class="text-[11px] text-cyan-400 font-mono font-bold">ON (+5500%)</span>
+                            </label>
+                            <div class="flex items-center space-x-1.5 p-1 bg-sangoku-dark rounded-xl border border-sangoku-cardBorder">
+                                <div class="grid grid-cols-2 gap-1 w-24">
+                                    <button type="button" id="btnLeadGoOff" onclick="LeadEngine.setGoEnabled(false)" class="py-1 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white">OFF</button>
+                                    <button type="button" id="btnLeadGoOn" onclick="LeadEngine.setGoEnabled(true)" class="py-1 text-xs font-bold rounded-lg transition bg-cyan-600 text-white shadow">ON</button>
+                                </div>
+                                <div class="flex-1 flex items-center justify-end space-x-1 pr-1">
+                                    <input type="number" id="optLeadGoBuff" value="5500" min="0" step="50" oninput="LeadEngine.updateGoBuff(this.value)" class="w-16 bg-black/60 border border-gray-700 rounded-lg px-1.5 py-0.5 text-xs text-amber-300 font-mono font-bold text-right focus:border-cyan-400 focus:outline-none">
+                                    <span class="text-xs text-gray-400 font-bold">%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex justify-between items-center pt-3 mt-3 border-t border-gray-800">
+                        <div class="text-[11px] text-gray-400">
+                            <i class="fa-solid fa-shield-halved text-emerald-400 mr-1"></i>副将ミニスロットはSL（紫太枠）、L（金）、UR（青）、SR（赤）の色分け表示を共通適用しています。
+                        </div>
+                        <button onclick="LeadEngine.run(true)" class="bg-gradient-to-r from-amber-600 to-red-600 hover:from-amber-500 hover:to-red-500 text-white font-bold text-sm px-8 py-2 rounded-xl shadow-lg transition flex items-center space-x-2 cursor-pointer">
+                            <i class="fa-solid fa-calculator"></i><span>引率火力を再計算する</span>
+                        </button>
+                    </div>
+                </div>
+                <div id="leadDeckResultArea" class="space-y-6"></div>
+            </div>
+
+            <!-- 3. 防御火力 最適化タブ -->
+            <div id="tab-def" class="tab-content hidden space-y-6">
+                <div class="bg-sangoku-cardBg border border-sangoku-cardBorder p-5 rounded-2xl shadow-md">
+                    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <h2 class="text-base font-bold text-white flex items-center space-x-2">
+                                <i class="fa-solid fa-shield-halved text-sky-400"></i><span>防御シミュレーション条件</span>
+                            </h2>
+                            <span class="text-xs bg-sky-950/80 border border-sky-500/50 text-sky-300 px-2.5 py-0.5 rounded font-bold">拠点防衛 ＆ 南蛮防衛</span>
+                            <div id="defExcludedInfoBadge" class="hidden text-xs bg-red-950/70 border border-red-500/50 text-red-300 px-2.5 py-0.5 rounded-lg flex items-center space-x-2">
+                                <span>除外中: <b id="defExcludedCountText">0</b>名</span>
+                                <button type="button" onclick="AppCards.clearExcludedCards()" class="underline text-red-400 hover:text-white font-bold cursor-pointer">解除</button>
+                            </div>
+                        </div>
+                        <button type="button" onclick="DefEngine.run(true)" class="bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow transition flex items-center space-x-1.5 cursor-pointer">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i><span>全拠点の天候を自動最適化</span>
+                        </button>
+                    </div>
+
+                    <div class="mb-4 p-3 bg-sangoku-dark rounded-xl border border-amber-500/30 flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <div class="text-xs font-bold text-amber-300 flex items-center space-x-1.5">
+                                <i class="fa-solid fa-crown"></i>
+                                <span>防衛モード選択（南蛮モード時は「南蛮太守 5枠」が有効になります）</span>
+                            </div>
+                            <div id="labelDefNanbanStatus" class="text-[11px] text-gray-400 mt-0.5">通常防衛モード（南蛮太守枠なし）</div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-1.5 p-1 bg-black/60 rounded-xl border border-gray-800">
+                            <button type="button" id="btnDefNanbanOff" onclick="DefEngine.setNanbanMode(false)" class="px-3 py-1.5 text-xs font-bold rounded-lg transition bg-sky-600 text-white shadow cursor-pointer">通常防衛 (戦争)</button>
+                            <button type="button" id="btnDefNanbanOn" onclick="DefEngine.setNanbanMode(true)" class="px-3 py-1.5 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">南蛮モード (太守5枠)</button>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">防衛対象拠点</label>
+                            <select id="defTargetBase" onchange="DefEngine.run(true)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-2 text-sm text-sky-400 font-bold cursor-pointer">
+                                <option value="HONKYO" selected>本拠・塔 を防衛</option>
+                                <option value="KYOTEN">拠点＋ を防衛</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">防衛する兵種</label>
+                            <select id="defTroop" onchange="DefEngine.run(true)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-2 text-sm text-white cursor-pointer font-bold">
+                                <option value="HEAVY_SPEAR" selected>重装槍兵 (天兵 / 基礎防 286)</option>
+                                <option value="HEAVY_BOW">重装弓兵 (天兵 / 基礎防 262)</option>
+                                <option value="HEAVY_CAV">重装騎兵 (天兵 / 基礎防 253)</option>
+                                <option value="GUARD">近衛兵 (上級兵 / 基礎防 190)</option>
+                                <option value="HAMMER">大錘兵 (鋭兵 / 基礎防 185)</option>
+                                <option value="AXE">戦斧兵 (鋭兵 / 基礎防 142)</option>
+                                <option value="TWIN">双剣兵 (鋭兵 / 基礎防 105)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">防衛兵数</label>
+                            <input type="number" id="defTroopCount" value="300000" min="0" step="5000" oninput="DefEngine.run(false)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-2 text-sm text-white font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">コスト上限配分 (本拠 / 拠点)</label>
+                            <select id="defCostDist" onchange="DefEngine.run(true)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-2 text-sm text-white cursor-pointer font-mono">
+                                <option value="30-25" selected>本拠: 30.0 / 拠点: 25.0</option>
+                                <option value="25-30">本拠: 25.0 / 拠点: 30.0</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="mb-4 p-3.5 bg-sangoku-dark/90 rounded-xl border border-sky-500/30">
+                        <div class="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+                            <span class="text-xs font-bold text-sky-300 flex items-center space-x-1.5">
+                                <i class="fa-solid fa-chess-rook"></i>
+                                <span>内政官を置ける拠点数（戦争で狙われて拠点が消滅する想定に対応）</span>
+                            </span>
+                            <div class="flex flex-wrap items-center gap-1.5">
+                                <button type="button" onclick="DefEngine.setNaiseiPreset(2, 9)" class="px-2 py-0.5 text-[10px] font-bold rounded bg-gray-800 hover:bg-sky-700 text-gray-200 border border-gray-700 cursor-pointer">フル稼働 (本拠2+拠点9)</button>
+                                <button type="button" onclick="DefEngine.setNaiseiPreset(2, 3)" class="px-2 py-0.5 text-[10px] font-bold rounded bg-gray-800 hover:bg-amber-700 text-gray-200 border border-gray-700 cursor-pointer">前線喪失 (本拠2+拠点3)</button>
+                                <button type="button" onclick="DefEngine.setNaiseiPreset(2, 0)" class="px-2 py-0.5 text-[10px] font-bold rounded bg-red-950 hover:bg-red-800 text-red-200 border border-red-500/50 cursor-pointer">本拠籠城 (本拠2+拠点0)</button>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-[11px] font-semibold text-gray-400 mb-1">本拠デッキ側 内政官枠 (本拠・塔 / 最大2枠)</label>
+                                <select id="defHonkyoNaiseiSlots" onchange="DefEngine.run(true)" class="w-full bg-black/70 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-amber-300 font-bold cursor-pointer">
+                                    <option value="2" selected>2枠 (1.本拠 ＋ 2.塔)</option>
+                                    <option value="1">1枠 (1.本拠 のみ)</option>
+                                    <option value="0">0枠 (内政官なし)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="block text-[11px] font-semibold text-gray-400 mb-1">拠点＋デッキ側 内政官を置ける拠点数 (0〜9個)</label>
+                                <select id="defKyotenNaiseiSlots" onchange="DefEngine.run(true)" class="w-full bg-black/70 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-sky-300 font-bold cursor-pointer">
+                                    <option value="9" selected>9個 (拠点1〜9 すべて生存)</option>
+                                    <option value="8">8個 (1拠点喪失)</option>
+                                    <option value="7">7個 (2拠点喪失)</option>
+                                    <option value="6">6個 (3拠点喪失)</option>
+                                    <option value="5">5個 (4拠点喪失)</option>
+                                    <option value="4">4個 (5拠点喪失)</option>
+                                    <option value="3">3個 (6拠点喪失)</option>
+                                    <option value="2">2個 (7拠点喪失)</option>
+                                    <option value="1">1個 (8拠点喪失)</option>
+                                    <option value="0">0個 (本拠以外すべて消滅)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 pt-3 border-t border-gray-800">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1.5">副将の配置設定</label>
+                            <select id="defAdjutantMode" onchange="DefEngine.changeAdjutantMode(this.value)" class="w-full bg-sangoku-dark border border-purple-500/40 rounded-lg px-2.5 py-1.5 text-xs text-white cursor-pointer font-bold focus:border-purple-400">
+                                <option value="CURRENT">① 現在の副将のまま計算</option>
+                                <option value="FILL_EMPTY">② 空き枠にのみ副将を追加</option>
+                                <option value="REASSIGN_ALL" selected>③ 副将を最適に再配分</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1.5 flex items-center justify-between">
+                                <span><i class="fa-solid fa-scale-balanced text-emerald-400 mr-1"></i>兵科相性倍率</span>
+                                <span id="labelDefMatchupStatus" class="text-[11px] text-gray-400 font-mono">等倍 (×1.0)</span>
+                            </label>
+                            <select id="defMatchupMult" onchange="DefEngine.updateMatchup(this.value)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-2.5 py-1.5 text-xs text-white font-bold cursor-pointer">
+                                <option value="1.0" selected>等倍・標準 (×1.0)</option>
+                                <option value="2.4">有利兵科受け (×2.4 / 天兵有利)</option>
+                                <option value="0.5">不利兵科受け (×0.5)</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1.5 flex items-center justify-between">
+                                <span><i class="fa-solid fa-gem text-sky-400 mr-1"></i>防御力10%UP (課金)</span>
+                                <span id="labelDefBuff10Status" class="text-[11px] text-gray-400 font-mono">OFF (×1.0)</span>
+                            </label>
+                            <div class="grid grid-cols-2 gap-1.5 p-1 bg-sangoku-dark rounded-xl border border-sangoku-cardBorder">
+                                <button type="button" id="btnDefBuff10Off" onclick="DefEngine.setBuff10(false)" class="py-1 text-xs font-bold rounded-lg transition bg-gray-700 text-white shadow cursor-pointer">OFF</button>
+                                <button type="button" id="btnDefBuff10On" onclick="DefEngine.setBuff10(true)" class="py-1 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">ON (+10%)</button>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1.5 flex items-center justify-between">
+                                <span><i class="fa-solid fa-users text-cyan-400 mr-1"></i>伍・防令バフ</span>
+                                <span id="labelDefGoStatus" class="text-[11px] text-cyan-400 font-mono font-bold">ON (+3000%)</span>
+                            </label>
+                            <div class="flex items-center space-x-1.5 p-1 bg-sangoku-dark rounded-xl border border-sangoku-cardBorder">
+                                <div class="grid grid-cols-2 gap-1 w-24">
+                                    <button type="button" id="btnDefGoOff" onclick="DefEngine.setGoEnabled(false)" class="py-1 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">OFF</button>
+                                    <button type="button" id="btnDefGoOn" onclick="DefEngine.setGoEnabled(true)" class="py-1 text-xs font-bold rounded-lg transition bg-cyan-600 text-white shadow cursor-pointer">ON</button>
+                                </div>
+                                <div class="flex-1 flex items-center justify-end space-x-1 pr-1">
+                                    <input type="number" id="optDefGoBuff" value="3000" min="0" step="50" oninput="DefEngine.updateGoBuff(this.value)" class="w-16 bg-black/60 border border-gray-700 rounded-lg px-1.5 py-0.5 text-xs text-amber-300 font-mono font-bold text-right focus:border-cyan-400 focus:outline-none">
+                                    <span class="text-xs text-gray-400 font-bold">%</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex justify-between items-center pt-3 mt-3 border-t border-gray-800">
+                        <div class="text-[11px] text-gray-400">
+                            <i class="fa-solid fa-fort-awesome text-sky-400 mr-1"></i>南蛮モードON時は高コストパッシブ武将5人を「南蛮太守」へコスト0配置し、空きコストで防御力を最大化します。
+                        </div>
+                        <button onclick="DefEngine.run(true)" class="bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 text-white font-bold text-sm px-8 py-2 rounded-xl shadow-lg transition flex items-center space-x-2 cursor-pointer">
+                            <i class="fa-solid fa-calculator"></i><span>防御火力を再計算する</span>
+                        </button>
+                    </div>
+                </div>
+                <div id="defDeckResultArea" class="space-y-6"></div>
+            </div>
+
+            <!-- 4. 北伐 最適化タブ -->
+            <div id="tab-hokubatsu" class="tab-content hidden space-y-6">
+                <div class="bg-sangoku-cardBg border border-purple-500/40 p-5 rounded-2xl shadow-md">
+                    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                        <div class="flex flex-wrap items-center gap-2">
+                            <h2 class="text-base font-bold text-white flex items-center space-x-2">
+                                <i class="fa-solid fa-flag text-purple-400"></i><span>北伐 統合デッキシミュレーション</span>
+                            </h2>
+                            <span class="text-xs bg-purple-950/80 border border-purple-500/50 text-purple-300 px-2.5 py-0.5 rounded font-bold">名前被り制限なし ＆ 副将一括固定</span>
+                            <div id="hokubatsuExcludedInfoBadge" class="hidden text-xs bg-red-950/70 border border-red-500/50 text-red-300 px-2.5 py-0.5 rounded-lg flex items-center space-x-2">
+                                <span>除外中: <b id="hokubatsuExcludedCountText">0</b>名</span>
+                                <button type="button" onclick="AppCards.clearExcludedCards()" class="underline text-red-400 hover:text-white font-bold cursor-pointer">解除</button>
+                            </div>
+                        </div>
+                        <button type="button" onclick="HokubatsuEngine.run(true)" class="bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 text-white text-xs font-bold px-4 py-1.5 rounded-lg shadow transition flex items-center space-x-1.5 cursor-pointer">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i><span>北伐セットを再計算</span>
+                        </button>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">北伐 引率兵種（斧兵・錘兵のみ自動算出）</label>
+                            <select id="hokuLeadTroop" onchange="HokubatsuEngine.run(true)" class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-2 text-sm text-amber-300 font-bold cursor-pointer">
+                                <option value="AXE" selected>戦斧兵 (斧兵 / 素攻 142・速 13) 優先</option>
+                                <option value="HAMMER">大錘兵 (錘兵 / 素攻 185・速 11) 優先</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">北伐 引率兵数（仕様固定）</label>
+                            <div class="w-full bg-black/60 border border-amber-500/40 rounded-lg px-3 py-2 text-sm text-amber-300 font-mono font-bold flex items-center justify-between">
+                                <span>100,000</span>
+                                <span class="text-[10px] bg-amber-950 text-amber-300 px-1.5 py-0.5 rounded border border-amber-500/30">10万固定</span>
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">副将一括アサイン設定</label>
+                            <select id="hokuAdjutantMode" onchange="HokubatsuEngine.run(true)" class="w-full bg-sangoku-dark border border-purple-500/40 rounded-lg px-2.5 py-2 text-xs text-white cursor-pointer font-bold">
+                                <option value="REASSIGN_ALL" selected>① 帝仙鏡を前衛/後衛へ優先配置＆余りを速度陣へ</option>
+                                <option value="CURRENT">② 現在の副将のまま計算</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-semibold text-gray-400 mb-1">攻撃力10%UP (課金)</label>
+                            <div class="grid grid-cols-2 gap-1.5 p-1 bg-sangoku-dark rounded-xl border border-sangoku-cardBorder">
+                                <button type="button" id="btnHokuBuff10Off" onclick="HokubatsuEngine.setBuff10(false)" class="py-1 text-xs font-bold rounded-lg transition bg-gray-700 text-white shadow cursor-pointer">OFF</button>
+                                <button type="button" id="btnHokuBuff10On" onclick="HokubatsuEngine.setBuff10(true)" class="py-1 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer">ON (+10%)</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="text-[11px] text-gray-400 pt-2 border-t border-gray-800 flex flex-wrap justify-between gap-2">
+                        <span><i class="fa-solid fa-circle-info text-purple-400 mr-1"></i>北伐ルール適用：引率エースは斧兵・錘兵のみ／兵数10万固定／帝仙鏡は前衛/後衛SL武将へ装着（コスト1.0化＋100%コピー）／後衛＝全拠点系スキルのみ</span>
+                    </div>
+                </div>
+                <div id="hokubatsuDeckResultArea" class="space-y-8"></div>
+            </div>
+
+            <!-- 5. カード図鑑・検索タブ（60枚ずつのページ分割 ＆ 第1/第2ソート対応） -->
+            <div id="tab-list" class="tab-content hidden space-y-4">
+                <div class="bg-sangoku-cardBg border border-sangoku-cardBorder p-4 rounded-xl shadow-md space-y-3">
+                    <div class="flex flex-wrap items-center gap-3">
+                        <div class="relative flex-1 md:w-64 min-w-[200px]">
+                            <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-gray-500 text-xs"></i>
+                            <input type="text" id="searchInput" placeholder="武将名・カードNoで検索..." class="w-full bg-sangoku-dark border border-sangoku-cardBorder rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:border-amber-400 transition">
+                        </div>
+                        <select id="filterRarity" class="bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-1.5 text-xs text-white font-bold cursor-pointer">
+                            <option value="ALL">全レアリティ</option>
+                            <option value="SL">SL</option><option value="L">L</option><option value="UR">UR</option>
+                            <option value="SR">SR</option><option value="R">R</option><option value="UC">UC</option><option value="C">C</option>
+                        </select>
+                        <select id="filterCountry" class="bg-sangoku-dark border border-sangoku-cardBorder rounded-lg px-3 py-1.5 text-xs text-white font-bold cursor-pointer">
+                            <option value="ALL">全勢力</option>
+                            <option value="魏">魏</option><option value="呉">呉</option><option value="蜀">蜀</option><option value="他">他</option><option value="覇">覇</option><option value="改">改</option>
+                        </select>
+                        <div id="listExcludedInfoBadge" class="hidden text-xs bg-red-950/70 border border-red-500/50 text-red-300 px-2.5 py-1 rounded-lg flex items-center space-x-2">
+                            <span>除外中: <b id="listExcludedCountText">0</b>名</span>
+                            <button type="button" onclick="AppCards.clearExcludedCards()" class="underline text-red-400 hover:text-white font-bold cursor-pointer">解除</button>
+                        </div>
+                        <div class="text-xs text-gray-400 font-mono pt-1 ml-auto">該当: <span id="filteredCountBadge" class="text-white font-bold">0</span>件</div>
+                    </div>
+
+                    <!-- 2段階ソートUI -->
+                    <div class="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-800/80">
+                        <div class="flex items-center space-x-1.5 bg-black/40 border border-gray-700 px-2 py-1.5 rounded-lg">
+                            <span class="text-[10px] text-gray-400 font-bold">【第1検索】</span>
+                            <select id="sortKey1" class="bg-sangoku-dark border border-gray-700 rounded px-1.5 py-1 text-xs text-cyan-300 font-bold cursor-pointer">
+                                <option value="NONE">未設定</option>
+                                <option value="cardNo">カードNo</option>
+                                <option value="rarity" selected>レアリティ</option>
+                                <option value="level">武将Lv</option>
+                                <option value="score">スコア</option>
+                                <option value="cost">コスト</option>
+                                <option value="attack">攻撃力</option>
+                                <option value="intelligence">知力</option>
+                                <option value="defInfantry">歩兵防御</option>
+                                <option value="defSpear">槍兵防御</option>
+                                <option value="defBow">弓兵防御</option>
+                                <option value="defCav">騎兵防御</option>
+                                <option value="defAxe">斧兵防御</option>
+                                <option value="defDouble">双兵防御</option>
+                                <option value="defHammer">錘兵防御</option>
+                                <option value="speed">移動速度</option>
+                            </select>
+                            <select id="sortDir1" class="bg-sangoku-dark border border-gray-700 rounded px-1.5 py-1 text-xs text-gray-200 cursor-pointer">
+                                <option value="desc" selected>高い順</option>
+                                <option value="asc">低い順</option>
+                            </select>
+                        </div>
+                        <div class="flex items-center space-x-1.5 bg-black/40 border border-gray-700 px-2 py-1.5 rounded-lg">
+                            <span class="text-[10px] text-gray-400 font-bold">【第2検索】</span>
+                            <select id="sortKey2" class="bg-sangoku-dark border border-gray-700 rounded px-1.5 py-1 text-xs text-cyan-300 font-bold cursor-pointer">
+                                <option value="NONE">未設定</option>
+                                <option value="cardNo">カードNo</option>
+                                <option value="rarity">レアリティ</option>
+                                <option value="level">武将Lv</option>
+                                <option value="score">スコア</option>
+                                <option value="cost">コスト</option>
+                                <option value="attack" selected>攻撃力</option>
+                                <option value="intelligence">知力</option>
+                                <option value="defInfantry">歩兵防御</option>
+                                <option value="defSpear">槍兵防御</option>
+                                <option value="defBow">弓兵防御</option>
+                                <option value="defCav">騎兵防御</option>
+                                <option value="defAxe">斧兵防御</option>
+                                <option value="defDouble">双兵防御</option>
+                                <option value="defHammer">錘兵防御</option>
+                                <option value="speed">移動速度</option>
+                            </select>
+                            <select id="sortDir2" class="bg-sangoku-dark border border-gray-700 rounded px-1.5 py-1 text-xs text-gray-200 cursor-pointer">
+                                <option value="desc" selected>高い順</option>
+                                <option value="asc">低い順</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 上部ページャー（60枚単位） -->
+                <div id="cardListPagerTop"></div>
+
+                <!-- カードグリッド（1ページ最大60枚） -->
+                <div id="cardGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-x-3 gap-y-6"></div>
+
+                <!-- 下部ページャー（60枚単位） -->
+                <div id="cardListPagerBottom"></div>
+            </div>
+        </div>
+    </main>
+
+    <!-- 8つの独立モジュールを順番に読み込み -->
+    <script src="js/shared-database.js"></script>
+    <script src="js/hokubatsu-database.js"></script>
+    <script src="js/shared-cards.js"></script>
+    <script src="js/shared-ui.js"></script>
+    <script src="js/engine-solo.js"></script>
+    <script src="js/engine-lead.js"></script>
+    <script src="js/engine-def.js"></script>
+    <script src="js/engine-hokubatsu.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (window.SharedUI && SharedUI.updateModeUI) {
+                SharedUI.updateModeUI();
+            }
+
+            var demoBtn = document.getElementById('demoDataBtn');
+            if (demoBtn) demoBtn.addEventListener('click', function() { AppCards.loadData(SharedDB.DEMO_CARDS); });
+
+            var dropZone = document.getElementById('uploadDropZone');
+            if (dropZone) {
+                ['dragenter', 'dragover'].forEach(function(eventName) {
+                    dropZone.addEventListener(eventName, function(e) {
+                        e.preventDefault(); e.stopPropagation();
+                        dropZone.classList.add('border-amber-400', 'bg-amber-950/20');
+                    }, false);
+                });
+                ['dragleave', 'drop'].forEach(function(eventName) {
+                    dropZone.addEventListener(eventName, function(e) {
+                        e.preventDefault(); e.stopPropagation();
+                        dropZone.classList.remove('border-amber-400', 'bg-amber-950/20');
+                    }, false);
+                });
+                dropZone.addEventListener('drop', function(e) {
+                    var dt = e.dataTransfer;
+                    if (dt && dt.files && dt.files.length > 0) AppCards.processFile(dt.files[0]);
+                }, false);
+            }
+
+            window.addEventListener('dragover', function(e) { e.preventDefault(); }, false);
+            window.addEventListener('drop', function(e) { e.preventDefault(); }, false);
+
+            document.querySelectorAll('.nav-tab').forEach(function(tab) {
+                tab.addEventListener('click', function() {
+                    document.querySelectorAll('.nav-tab').forEach(function(b) {
+                        b.classList.remove('active', 'border-red-500', 'text-red-400', 'border-amber-500', 'text-amber-400', 'border-sky-500', 'text-sky-400', 'border-purple-500', 'text-purple-400', 'border-sangoku-gold', 'text-sangoku-gold');
+                        b.classList.add('border-transparent', 'text-gray-400');
+                    });
+                    var activeColorClass =
+                        (tab.dataset.tab === 'lead')      ? 'border-amber-500 text-amber-400' :
+                        (tab.dataset.tab === 'solo')      ? 'border-red-500 text-red-400' :
+                        (tab.dataset.tab === 'def')       ? 'border-sky-500 text-sky-400' :
+                        (tab.dataset.tab === 'hokubatsu') ? 'border-purple-500 text-purple-400' :
+                        'border-sangoku-gold text-sangoku-gold';
+                    tab.classList.remove('border-transparent', 'text-gray-400');
+                    tab.className += ' active ' + activeColorClass;
+
+                    document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.add('hidden'); });
+                    var target = document.getElementById('tab-' + tab.dataset.tab);
+                    if (target) target.classList.remove('hidden');
+
+                    if (AppCards.userCards.length > 0) {
+                        if (tab.dataset.tab === 'solo') {
+                            var areaS = document.getElementById('soloDeckResultArea');
+                            if (!areaS || areaS.innerHTML.trim() === '') {
+                                AppCards.setStatusLog("単騎最適化計算を準備中...");
+                                setTimeout(function() { SoloEngine.run(true); }, 16);
+                            }
+                        } else if (tab.dataset.tab === 'lead') {
+                            var areaL = document.getElementById('leadDeckResultArea');
+                            if (!areaL || areaL.innerHTML.trim() === '') {
+                                AppCards.setStatusLog("引率最適化計算を準備中...");
+                                setTimeout(function() { LeadEngine.run(true); }, 16);
+                            }
+                        } else if (tab.dataset.tab === 'def') {
+                            var areaD = document.getElementById('defDeckResultArea');
+                            if (!areaD || areaD.innerHTML.trim() === '') {
+                                AppCards.setStatusLog("防御最適化計算を準備中...");
+                                setTimeout(function() { DefEngine.run(true); }, 16);
+                            }
+                        } else if (tab.dataset.tab === 'hokubatsu') {
+                            var areaH = document.getElementById('hokubatsuDeckResultArea');
+                            if (!areaH || areaH.innerHTML.trim() === '') {
+                                AppCards.setStatusLog("北伐統合最適化計算を準備中...");
+                                setTimeout(function() { HokubatsuEngine.run(true); }, 16);
+                            }
+                        } else if (tab.dataset.tab === 'list') {
+                            SharedUI.renderCardList(false);
+                        }
+                    }
+                });
+            });
+
+            var searchElements = ['searchInput', 'filterRarity', 'filterCountry', 'sortKey1', 'sortDir1', 'sortKey2', 'sortDir2'];
+            searchElements.forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el) {
+                    el.addEventListener(el.tagName === 'INPUT' ? 'input' : 'change', function() {
+                        SharedUI.renderCardList(true);
+                    });
+                }
+            });
+        });
+    </script>
+</body>
+</html>
