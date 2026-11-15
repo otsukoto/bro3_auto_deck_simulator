@@ -1,6 +1,6 @@
-// @version 1.0
 // ========================================================
-// 【エンジン 1】単騎火力 計算・最適化ロジック
+// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 1.01)
+// 役割：単騎エース・内政・パッシブ・警護デッキ最適化、7兵科別比較、SL2枚ペア＆一般副将合計値比較
 // ========================================================
 window.SoloEngine = (function() {
     var isBuff10 = false;
@@ -140,6 +140,42 @@ window.SoloEngine = (function() {
         return res;
     }
 
+    function buildSoloGeneralAdjutantCand(gCard, masterRole, weatherObj) {
+        if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
+        var skills = gCard.skills || [];
+        if (skills.length === 0 || !skills[0]) return null;
+        var s0 = skills[0];
+        var sName = String(s0.name || '').trim();
+        if (!sName || sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || isDuelSkill(s0)) return null;
+
+        var p0 = parseSkill(s0, weatherObj);
+        var gk0 = SharedDB.getGekireiBonus(s0, gCard.rarity, 4.5);
+        var gkAdd = (gk0 && gk0.bonus) || 0;
+
+        // 内政官・サポート(masterRole !== 'lead')には「攻:」第1スキル（単騎専用）を絶対につけない
+        if (masterRole !== 'lead' && (p0.isLead && !p0.isSupport)) {
+            return null;
+        }
+
+        var gVal = (masterRole === 'lead') ? SharedDB.safeNum(p0.leadBuff, 0) : SharedDB.safeNum(p0.gMult, 0);
+        if (gVal <= 0 && gkAdd <= 0) return null;
+
+        var cleanSName = sName.replace(/^(?:攻防|攻|防|変|副攻|副防|副変):/, '').replace(/LV[0-9]+$/i, '');
+        var badge = (gkAdd > 0)
+            ? ('[副]' + cleanSName + ' 檄+' + gkAdd.toLocaleString())
+            : ('[副]' + cleanSName + ' 将+' + SharedDB.formatBuffNum(gVal) + '%');
+
+        return {
+            card: gCard,
+            uniqueId: gCard.uniqueId,
+            cardNo: gCard.cardNo,
+            genGMult: gVal,
+            genRaw: gkAdd,
+            label: badge,
+            genStats: { soloG: gVal, soloGk: gkAdd }
+        };
+    }
+
     function evaluateCard(card, weatherObj, mode, masterCost) {
         var skills = (card && card.skills) || [];
         if (skills.length === 0) return { gMult: 0, rawAdd: 0, firstRawAdd: 0, firstGMult: 0, isPassive: false, isGuard: false, isActive: false, mustBeSameBase: false, isShurei: false, isGekirei: false, series: null };
@@ -156,7 +192,7 @@ window.SoloEngine = (function() {
 
         var passiveRawAdd = baseGkBonus;
         var passiveBuffSum = 0;
-        var activeCandidates = []; // 主将自身のアクティブスキル（覇以外は最大1つのみ発動）
+        var activeCandidates = [];
         var hasPassive = p0.isPassive;
         var isGuardCard = p0.isGuard;
         var mustBeSameBase = p0.mustBeSameBase;
@@ -182,7 +218,6 @@ window.SoloEngine = (function() {
             var isFromAdjutant = (sName.indexOf("副:") === 0 || sName.indexOf("副変:") === 0 || sName.indexOf("副攻:") === 0 || sName.indexOf("副防:") === 0 || sName.indexOf("副ﾃﾞｭｴﾙ:") === 0);
             if (!isHa && isFromAdjutant) continue;
 
-            // 主将自身の明鏡（パッシブ扱い：1枠目スキルをレベル別コピー率で自動発動）
             var isShujoMirror = !isFromAdjutant && (
                 sName.indexOf("主将の") !== -1 ||
                 sName.indexOf("明鑑") !== -1 ||
@@ -225,7 +260,6 @@ window.SoloEngine = (function() {
             }
         }
 
-        // 一般武将はアクティブスキル1つだけ発動、覇武将は全アクティブスキル同時発動
         var activeBuffSum = 0;
         var hasActive = false;
         var isShureiCard = false;
@@ -863,6 +897,13 @@ window.SoloEngine = (function() {
                     var availableMirrors = allMirrorPool.filter(function(m) {
                         return !allDeckUsedCardIds.has(m.uniqueId) && !allDeckUsedCardNos.has(m.cardNo) && !usedTeisenCardIds.has(m.uniqueId);
                     });
+                    var availableGeneralPool = validCards.filter(function(gc) {
+                        return !allDeckUsedCardIds.has(gc.uniqueId) &&
+                               !allDeckUsedCardNos.has(gc.cardNo || gc.uniqueId) &&
+                               !usedTeisenCardIds.has(gc.uniqueId) &&
+                               !SharedDB.getMirrorSkillInfo(gc) &&
+                               !SharedDB.isMirrorCard(gc.name);
+                    });
 
                     masterList.forEach(function(master) {
                         var mCard = master.card;
@@ -902,13 +943,22 @@ window.SoloEngine = (function() {
                         var unusedForMaster = availableMirrors.filter(function(fk) {
                             return !usedMirrorIds.has(fk.uniqueId) && !usedMirrorNos.has(fk.cardNo);
                         });
+                        var validGenCands = [];
+                        for (var gi = 0; gi < availableGeneralPool.length; gi++) {
+                            var gc = availableGeneralPool[gi];
+                            var gcNo = gc.cardNo || gc.uniqueId;
+                            if (usedMirrorIds.has(gc.uniqueId) || usedMirrorNos.has(gcNo)) continue;
+                            var gCand = buildSoloGeneralAdjutantCand(gc, master.role, leadBestWeather);
+                            if (gCand) validGenCands.push(gCand);
+                        }
 
                         var bestCombo = SharedDB.findBestAdjutantCombo(mCard, unusedForMaster, currentAssigned, usedAdjutantCostMap[mCard.uniqueId], {
                             baseCopyG: master.isGekirei ? 0 : master.baseCopyVal,
                             baseCopyRaw: master.isGekirei ? master.baseCopyRawAdd : 0,
                             wGen: leadBaseWithAdjEst2 / 100,
                             wRaw: guardMultFactor,
-                            wAtk: (master.role === 'lead') ? guardMultFactor * 1.5 : 0
+                            wAtk: (master.role === 'lead') ? guardMultFactor * 1.5 : 0,
+                            generalPool: validGenCands
                         });
 
                         bestCombo.forEach(function(chosenFk) {
@@ -917,7 +967,18 @@ window.SoloEngine = (function() {
                             usedAdjutantCostMap[mCard.uniqueId] += chosenFk.cost;
                             if (master.role === 'lead') leadAdjutantAtkBonus += chosenFk.atkBonus;
                             currentAssigned.push(chosenFk);
-                            if (master.isGekirei && master.baseCopyRawAdd > 0) {
+                            if (chosenFk.isGeneralSkill && chosenFk.genStats) {
+                                var gB = SharedDB.safeNum(chosenFk.genStats.soloG, 0);
+                                var gGk = SharedDB.safeNum(chosenFk.genStats.soloGk, 0);
+                                if (gB > 0) {
+                                    additionalAdjutantBuff += gB;
+                                    adjutantAddedBuffMap[mCard.uniqueId] += gB;
+                                }
+                                if (gGk > 0) {
+                                    totalGekireiBonus += gGk;
+                                    adjutantAddedGekireiMap[mCard.uniqueId] += gGk;
+                                }
+                            } else if (master.isGekirei && master.baseCopyRawAdd > 0) {
                                 var addGk = master.baseCopyRawAdd * (chosenFk.copyRate / 100);
                                 totalGekireiBonus += addGk;
                                 adjutantAddedGekireiMap[mCard.uniqueId] += addGk;

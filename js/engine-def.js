@@ -1,6 +1,6 @@
-// @version 1.0
 // ========================================================
-// 【エンジン 3】防御火力 計算・最適化ロジック（一般武将アクティブ1つ制限・覇全アクティブ同時・デュエル除外版）
+// 【兵士防御計算エンジン】js/engine-def.js (Ver. 1.01)
+// 役割：拠点防衛・南蛮太守5枠最適化、一般武将アクティブ1つ制限・覇全アクティブ同時、SL2枚ペア＆一般副将合計値比較
 // ========================================================
 window.DefEngine = (function() {
     var isDefBuff10 = false;
@@ -171,6 +171,40 @@ window.DefEngine = (function() {
         return res;
     }
 
+    function buildDefGeneralAdjutantCand(gCard, targetTroopData, weatherObj) {
+        if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
+        var skills = gCard.skills || [];
+        if (skills.length === 0 || !skills[0]) return null;
+        var s0 = skills[0];
+        var sName = String(s0.name || '').trim();
+        if (!sName || sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || isDuelSkill(s0)) return null;
+
+        // 攻撃スキル持ち一般武将は防衛サポート副将から除外
+        if (sName.indexOf('攻:') === 0 || sName.indexOf('副攻:') === 0) return null;
+
+        var p0 = parseDefSkill(s0, targetTroopData, weatherObj);
+        if (!p0.isDefSkill) return null;
+
+        var tVal = SharedDB.safeNum(p0.tMult, 0);
+        var gVal = SharedDB.safeNum(p0.gMult, 0);
+        if (tVal <= 0 && gVal <= 0) return null;
+
+        var cleanSName = sName.replace(/^(?:攻防|攻|防|変|副攻|副防|副変):/, '').replace(/LV[0-9]+$/i, '');
+        var badge = (tVal > 0)
+            ? ('[副]' + cleanSName + ' 防+' + SharedDB.formatBuffNum(tVal) + '%')
+            : ('[副]' + cleanSName + ' 将防+' + SharedDB.formatBuffNum(gVal) + '%');
+
+        return {
+            card: gCard,
+            uniqueId: gCard.uniqueId,
+            cardNo: gCard.cardNo,
+            genTMult: tVal,
+            genGMult: gVal,
+            label: badge,
+            genStats: { defT: tVal, defG: gVal }
+        };
+    }
+
     function evaluateCardDef(card, targetTroopData, weatherObj, excludeSubSkills) {
         var empty = {
             tMult: 0, gMult: 0, firstTMult: 0, firstGMult: 0,
@@ -187,7 +221,7 @@ window.DefEngine = (function() {
         var passiveTMult = 0, passiveGMult = 0;
         var passivePerCountry = 0, reqCountry = p0.reqCountry;
         var passiveDmgReduce = 0;
-        var activeCandidates = []; // 主将自身のアクティブスキル（覇以外は最大1つのみ発動）
+        var activeCandidates = [];
         var isGuardCard = p0.isGuardDeck;
         var mustBeSameBaseCard = false;
         var isHa = SharedDB.isHaBusho(card);
@@ -205,7 +239,6 @@ window.DefEngine = (function() {
 
             var parsed = parseDefSkill(s, targetTroopData, weatherObj);
 
-            // 主将自身の明鏡（パッシブ扱い：1枠目スキルをレベル別コピー率で自動発動）
             var isSelfMirror = (idx > 0) && !isFromAdj && (
                 sName.indexOf('変:') === 0 ||
                 sName.indexOf('主将の') !== -1 ||
@@ -245,7 +278,6 @@ window.DefEngine = (function() {
             }
         }
 
-        // 一般武将はアクティブスキル1つだけ発動、覇武将は全アクティブスキル同時発動
         var activeTMult = 0, activeGMult = 0;
         var activePerCountry = 0, activeDmgReduce = 0;
         var isManualNaisei = false;
@@ -348,7 +380,7 @@ window.DefEngine = (function() {
         try {
             var uCards = AppCards.userCards;
             if (!uCards || uCards.length === 0) return;
-            AppCards.setStatusLog("防御最適化計算中... (" + uCards.length + "枚)");
+            AppCards.setStatusLog("兵士防御最適化計算中... (" + uCards.length + "枚)");
 
             var elTargetBase = document.getElementById('defTargetBase');
             var elTroop = document.getElementById('defTroop');
@@ -773,6 +805,13 @@ window.DefEngine = (function() {
                 var availableMirrors = allMirrorPool.filter(function(m) {
                     return !allDeckUsedIds.has(m.uniqueId) && !allDeckUsedNos.has(m.cardNo) && !usedTeisenCardIds.has(m.uniqueId);
                 });
+                var availableGeneralPool = validCards.filter(function(gc) {
+                    return !allDeckUsedIds.has(gc.uniqueId) &&
+                           !allDeckUsedNos.has(gc.cardNo || gc.uniqueId) &&
+                           !usedTeisenCardIds.has(gc.uniqueId) &&
+                           !SharedDB.getMirrorSkillInfo(gc) &&
+                           !SharedDB.isMirrorCard(gc.name);
+                });
 
                 var troopDefWeight = Math.max(1000, (targetTroopData.defense * troopCount) / 100);
 
@@ -817,13 +856,22 @@ window.DefEngine = (function() {
                     var unusedForMaster = availableMirrors.filter(function(fk) {
                         return !usedMirrorIds.has(fk.uniqueId) && !usedMirrorNos.has(fk.cardNo);
                     });
+                    var validGenCands = [];
+                    for (var gi = 0; gi < availableGeneralPool.length; gi++) {
+                        var gc = availableGeneralPool[gi];
+                        var gcNo = gc.cardNo || gc.uniqueId;
+                        if (usedMirrorIds.has(gc.uniqueId) || usedMirrorNos.has(gcNo)) continue;
+                        var gCand = buildDefGeneralAdjutantCand(gc, targetTroopData, 'SUN');
+                        if (gCand) validGenCands.push(gCand);
+                    }
 
                     var bestCombo = SharedDB.findBestAdjutantCombo(mCard, unusedForMaster, currentAssigned, usedAdjutantCostMap[mCard.uniqueId], {
                         baseCopyT: master.baseCopyTVal,
                         baseCopyG: master.baseCopyGVal,
                         wTroop: troopDefWeight,
                         wGen: SharedDB.safeNum(mCard.baseDefense !== undefined ? mCard.baseDefense : mCard.defense, 1000) / 100,
-                        wDef: 50
+                        wDef: 50,
+                        generalPool: validGenCands
                     });
 
                     bestCombo.forEach(function(chosenFk) {
@@ -832,12 +880,21 @@ window.DefEngine = (function() {
                         usedAdjutantCostMap[mCard.uniqueId] += chosenFk.cost;
                         totalDefenderAdjDefBonus += SharedDB.safeNum(chosenFk.defBonus, 0);
                         currentAssigned.push(chosenFk);
-                        var addT = master.baseCopyTVal * (chosenFk.copyRate / 100);
-                        var addG = master.baseCopyGVal * (chosenFk.copyRate / 100);
-                        additionalAdjutantTroopBuff += addT;
-                        additionalAdjutantGenBuff += addG;
-                        adjutantAddedTroopBuffMap[mCard.uniqueId] += addT;
-                        adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
+                        if (chosenFk.isGeneralSkill && chosenFk.genStats) {
+                            var gT = SharedDB.safeNum(chosenFk.genStats.defT, 0);
+                            var gG = SharedDB.safeNum(chosenFk.genStats.defG, 0);
+                            additionalAdjutantTroopBuff += gT;
+                            additionalAdjutantGenBuff += gG;
+                            adjutantAddedTroopBuffMap[mCard.uniqueId] += gT;
+                            adjutantAddedGenBuffMap[mCard.uniqueId] += gG;
+                        } else {
+                            var addT = master.baseCopyTVal * (chosenFk.copyRate / 100);
+                            var addG = master.baseCopyGVal * (chosenFk.copyRate / 100);
+                            additionalAdjutantTroopBuff += addT;
+                            additionalAdjutantGenBuff += addG;
+                            adjutantAddedTroopBuffMap[mCard.uniqueId] += addT;
+                            adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
+                        }
                     });
                 });
             }
@@ -929,10 +986,10 @@ window.DefEngine = (function() {
             currentDefSetup = setup;
             render(setup);
             var modeTag = isNanbanMode ? ("南蛮モード・太守" + pickedNanbanTaishu.length + "枠 / 節約" + nanbanSavedCost.toFixed(1) + "C") : "通常防衛モード";
-            AppCards.setStatusLog("防御最適化完了 (" + modeTag + "): 総合防御力 " + finalTotalDefense.toLocaleString());
+            AppCards.setStatusLog("兵士防御最適化完了 (" + modeTag + "): 総合防御力 " + finalTotalDefense.toLocaleString());
         } catch (err) {
             console.error("DefEngine.run Error:", err);
-            AppCards.setStatusLog("防御計算エラー: " + err.message, true);
+            AppCards.setStatusLog("兵士防御計算エラー: " + err.message, true);
         }
     }
 
@@ -1135,7 +1192,7 @@ window.DefEngine = (function() {
                 <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 border-b border-gray-800 pb-4 gap-4">
                     <div>
                         <div class="flex flex-wrap items-center gap-1.5 mb-2">
-                            <span class="bg-sky-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">防御計算結果</span>
+                            <span class="bg-sky-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">兵士防御計算結果</span>
                             <span class="bg-gray-800 border border-gray-600 text-amber-300 text-[10px] font-bold px-2 py-0.5 rounded">有効内政枠: 本拠${setup.maxHonkyoNaisei} + 拠点${setup.maxKyotenNaisei}</span>
                             ${extraBadges}
                             <h3 class="text-lg font-bold text-white ml-1">【防衛拠点: <span class="${baseColor}">${baseLabel}</span>】</h3>

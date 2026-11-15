@@ -1,6 +1,6 @@
-// @version 1.0
 // ========================================================
-// 【エンジン 2】引率火力 計算・最適化ロジック（単騎専用サポート除外・一般武将アクティブ1つ制限・覇全アクティブ同時・デュエル除外版）
+// 【引率火力計算エンジン】js/engine-lead.js (Ver. 1.01)
+// 役割：引率エース・内政・パッシブ・警護デッキ最適化、単騎専用サポート除外、SL2枚ペア＆一般副将合計値比較
 // ========================================================
 window.LeadEngine = (function() {
     var isLeadHighland = false;
@@ -179,6 +179,46 @@ window.LeadEngine = (function() {
         return result;
     }
 
+    function buildLeadGeneralAdjutantCand(gCard, masterRole, targetTroopData, weatherObj, leadCard) {
+        if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
+        var skills = gCard.skills || [];
+        if (skills.length === 0 || !skills[0]) return null;
+        var s0 = skills[0];
+        var sName = String(s0.name || '').trim();
+        if (!sName || sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || isDuelSkill(s0)) return null;
+
+        var isAttackFirst = (sName.indexOf('攻:') === 0 || sName.indexOf('副攻:') === 0 || sName.indexOf('攻防:') === 0);
+        // サポート陣(masterRole !== 'lead')には「攻:」第1スキル持ち一般武将をつけない
+        if (masterRole !== 'lead' && isAttackFirst) {
+            return null;
+        }
+
+        var parseMode = (masterRole === 'lead') ? 'lead' : 'support';
+        var p0 = parseLeadSkill(s0, targetTroopData, weatherObj, parseMode, leadCard);
+        if (masterRole !== 'lead' && p0.tMult <= 0) {
+            return null;
+        }
+        if (p0.tMult <= 0 && p0.gMult <= 0) {
+            return null;
+        }
+
+        var cleanSName = sName.replace(/^(?:攻防|攻|防|変|副攻|副防|副変):/, '').replace(/LV[0-9]+$/i, '');
+        var badge = (p0.tMult > 0)
+            ? ('[副]' + cleanSName + ' 兵+' + SharedDB.formatBuffNum(p0.tMult) + '%')
+            : ('[副]' + cleanSName + ' 将+' + SharedDB.formatBuffNum(p0.gMult) + '%');
+
+        return {
+            card: gCard,
+            uniqueId: gCard.uniqueId,
+            cardNo: gCard.cardNo,
+            genTMult: p0.tMult,
+            genGMult: p0.gMult,
+            genRaw: 0,
+            label: badge,
+            genStats: { leadT: p0.tMult, leadG: p0.gMult }
+        };
+    }
+
     function evaluateCardLead(card, targetTroopData, weatherObj, mode, leadCard, excludeSubSkills) {
         var empty = { tMult: 0, gMult: 0, firstTMult: 0, firstGMult: 0, isPassive: false, isGuard: false, isActive: false, mustBeSameBase: false, isShurei: false };
         if (!card.skills || !Array.isArray(card.skills) || card.skills.length === 0) return empty;
@@ -271,7 +311,6 @@ window.LeadEngine = (function() {
         var tMultTotal = passiveTMult + activeTMult;
         var gMultTotal = passiveGMult + activeGMult;
 
-        // 引率サポートモードでは、兵士攻撃力上昇(tMult > 0)を持たない単騎専用スキル（武将攻撃力のみ上昇）は除外
         if (mode === 'support' && tMultTotal <= 0) return empty;
         if (tMultTotal <= 0 && gMultTotal <= 0) return empty;
 
@@ -427,7 +466,6 @@ window.LeadEngine = (function() {
                         if (SharedDB.isHaBusho(c) || String(c.rarity || '').toUpperCase() !== 'SL' || SharedDB.safeNum(c.maxFukushoCost, 0) <= 0 || origC <= 1.0) {
                             return false;
                         }
-                        // 引率で実際に兵士バフを持つサポート候補のみに帝仙鏡を割り当てる（単騎専用サポートへの誤爆防止）
                         var bestSupT = getBestWeatherForCardForLead(c, targetTroopData, 'support', null, true).eval.tMult;
                         return bestSupT > 0;
                     });
@@ -512,7 +550,6 @@ window.LeadEngine = (function() {
                     var bestSup = getBestWeatherForCardForLead(sc, targetTroopData, 'support', leadCard, isReassignMode);
                     var probe = bestSup.eval;
                     if (!probe.isActive && !probe.isPassive && !probe.isGuard) continue;
-                    // 兵士攻撃力を上げない単騎専用サポートは引率サポート候補から完全に除外
                     if (SharedDB.safeNum(probe.tMult, 0) <= 0) continue;
 
                     var effCost = effectiveCostMap[sc.uniqueId];
@@ -874,6 +911,13 @@ window.LeadEngine = (function() {
                     var availableMirrors = allMirrorPool.filter(function(m) {
                         return !allDeckUsedIds.has(m.uniqueId) && !allDeckUsedNos.has(m.cardNo) && !usedTeisenCardIds.has(m.uniqueId);
                     });
+                    var availableGeneralPool = validCards.filter(function(gc) {
+                        return !allDeckUsedIds.has(gc.uniqueId) &&
+                               !allDeckUsedNos.has(gc.cardNo || gc.uniqueId) &&
+                               !usedTeisenCardIds.has(gc.uniqueId) &&
+                               !SharedDB.getMirrorSkillInfo(gc) &&
+                               !SharedDB.isMirrorCard(gc.name);
+                    });
 
                     var troopWeight = (targetTroopData.attack * troopCount) / 100;
 
@@ -918,13 +962,22 @@ window.LeadEngine = (function() {
                         var unusedForMaster = availableMirrors.filter(function(fk) {
                             return !usedMirrorIds.has(fk.uniqueId) && !usedMirrorNos.has(fk.cardNo);
                         });
+                        var validGenCands = [];
+                        for (var gi = 0; gi < availableGeneralPool.length; gi++) {
+                            var gc = availableGeneralPool[gi];
+                            var gcNo = gc.cardNo || gc.uniqueId;
+                            if (usedMirrorIds.has(gc.uniqueId) || usedMirrorNos.has(gcNo)) continue;
+                            var gCand = buildLeadGeneralAdjutantCand(gc, master.role, targetTroopData, leadItem.bestWeather, leadCard);
+                            if (gCand) validGenCands.push(gCand);
+                        }
 
                         var bestCombo = SharedDB.findBestAdjutantCombo(mCard, unusedForMaster, currentAssigned, usedAdjutantCostMap[mCard.uniqueId], {
                             baseCopyT: master.baseCopyVal,
                             baseCopyG: master.baseCopyGenVal,
                             wTroop: troopWeight,
                             wGen: SharedDB.safeNum(mCard.baseAttack, 1000) / 100,
-                            wAtk: (master.role === 'lead') ? 60 : 0
+                            wAtk: (master.role === 'lead') ? 60 : 0,
+                            generalPool: validGenCands
                         });
 
                         bestCombo.forEach(function(chosenFk) {
@@ -933,12 +986,21 @@ window.LeadEngine = (function() {
                             usedAdjutantCostMap[mCard.uniqueId] += chosenFk.cost;
                             if (master.role === 'lead') leadAdjutantAtkBonus += chosenFk.atkBonus;
                             currentAssigned.push(chosenFk);
-                            var addB = master.baseCopyVal * (chosenFk.copyRate / 100);
-                            var addG = master.baseCopyGenVal * (chosenFk.copyRate / 100);
-                            additionalAdjutantBuff += addB;
-                            additionalAdjutantGenBuff += addG;
-                            adjutantAddedBuffMap[mCard.uniqueId] += addB;
-                            adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
+                            if (chosenFk.isGeneralSkill && chosenFk.genStats) {
+                                var gT = SharedDB.safeNum(chosenFk.genStats.leadT, 0);
+                                var gG = SharedDB.safeNum(chosenFk.genStats.leadG, 0);
+                                additionalAdjutantBuff += gT;
+                                additionalAdjutantGenBuff += gG;
+                                adjutantAddedBuffMap[mCard.uniqueId] += gT;
+                                adjutantAddedGenBuffMap[mCard.uniqueId] += gG;
+                            } else {
+                                var addB = master.baseCopyVal * (chosenFk.copyRate / 100);
+                                var addG = master.baseCopyGenVal * (chosenFk.copyRate / 100);
+                                additionalAdjutantBuff += addB;
+                                additionalAdjutantGenBuff += addG;
+                                adjutantAddedBuffMap[mCard.uniqueId] += addB;
+                                adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
+                            }
                         });
                     });
                 }

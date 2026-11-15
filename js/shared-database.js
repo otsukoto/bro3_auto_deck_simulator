@@ -1,6 +1,6 @@
-// @version 1.0
 // ========================================================
-// 共有データベース モジュール（SL2枚ペア最適化 ＆ 主将明鏡LV別 ＆ 副将コスト再計算統合版）
+// 【共有データベースモジュール】js/shared-database.js (Ver. 1.01)
+// 役割：檄令・兵科・副将コピー率テーブル、SL2枚ペア最適化、一般副将第1スキル合計値比較を提供
 // ========================================================
 window.SharedDB = (function() {
     var GEKIREI_TABLES = {
@@ -59,7 +59,6 @@ window.SharedDB = (function() {
         RENKYO_ALL:    { 'C': 10, 'UC': 20, 'R': 50, 'SR': 60, 'UR': 70, 'L': 85, 'SL': 100 }
     };
 
-    // 主将自身の明鏡（変:主将の帝明鏡 等）レベル別コピー率テーブル（LV8=80%, LV10=100%）
     var MASTER_MEIKYO_LV_RATES = {
         1: 45, 2: 50, 3: 55, 4: 60, 5: 65,
         6: 70, 7: 75, 8: 80, 9: 90, 10: 100
@@ -82,7 +81,6 @@ window.SharedDB = (function() {
         return pct / 100;
     }
 
-    // 副将コストでの第1スキル再計算比率（コスト変動文言から逆算）
     function calcCostAdjustedRatio(skillOrDesc, masterOrigCost, adjutantCost) {
         var cM = safeNum(masterOrigCost, 4.5);
         var cF = safeNum(adjutantCost, cM);
@@ -106,7 +104,6 @@ window.SharedDB = (function() {
         return 1.0;
     }
 
-    // 副将の実効コピー率（%）を算出（明鏡の場合は副将コストで第1スキルを再計算した比率を反映）
     function calcAdjutantEffectiveCopyRate(masterCard, fkCard, mirrorInfo) {
         if (!masterCard || !fkCard || !mirrorInfo) return 0;
         var baseRate = safeNum(mirrorInfo.rate, 0);
@@ -129,7 +126,6 @@ window.SharedDB = (function() {
         return baseRate * calcCostAdjustedRatio(s0, mOrigCost, fkCost);
     }
 
-    // 女性・動物・その他性別判定テーブル（娘将の錬鏡 100%対象）
     var FEMALE_OTHER_EXACT_TOKENS = {
         '夏侯氏': 1, '黄月英': 1, '甘夫人': 1, '糜夫人': 1, '敬哀皇后': 1, '穆皇后': 1,
         '関銀屏': 1, '張姫': 1, '鮑三娘': 1, '馬雲緑': 1, '王悦': 1, '王桃': 1,
@@ -428,7 +424,6 @@ window.SharedDB = (function() {
         var sDesc = skills.length > 0 && skills[0] ? String(skills[0].description || '').trim() : String(card.skill_desc || card.description || '').trim();
         var sText = sName + " " + sDesc;
 
-        // 1. 帝仙鏡
         if (sName.indexOf("帝仙鏡") !== -1 || (sName.indexOf("仙鏡") !== -1 && sName.indexOf("帝") !== -1) || (sDesc.indexOf("帝仙鏡") !== -1 && sName.indexOf("副将") !== -1)) {
             var stSen = getAdjutantStatusEffect(card, { type: 'senkyo', rarity: 'SL', rate: 100 });
             return {
@@ -438,7 +433,6 @@ window.SharedDB = (function() {
             };
         }
 
-        // 2. 娘将の〇〇錬鏡
         var mMusume = sName.match(/娘将の(帝|天|神|大)?錬鏡/) || sText.match(/娘将の(帝|天|神|大)?錬鏡/);
         if (mMusume) {
             var rCharM = mMusume[1];
@@ -455,7 +449,6 @@ window.SharedDB = (function() {
             };
         }
 
-        // 3. 勢力別錬鏡（蜀・魏・呉・群・他）
         var mRen = sName.match(/(蜀|魏|呉|群|他)将の(帝|天|神|大)?錬鏡/) || sText.match(/(蜀|魏|呉|群|他)将の(帝|天|神|大)?錬鏡/);
         if (mRen) {
             var fChar = mRen[1];
@@ -474,7 +467,6 @@ window.SharedDB = (function() {
             };
         }
 
-        // 4. 明鏡（帝・天・神・大・通常）
         var mMei = sName.match(/(?:副将の)?(帝|天|神|大)?明鏡/) || sText.match(/(?:副将の)?(帝|天|神|大)?明鏡/);
         if (mMei) {
             var rChar2 = mMei[1];
@@ -558,10 +550,6 @@ window.SharedDB = (function() {
         return { ok: false, rate: 0 };
     }
 
-    // =========================================================================
-    // 【SL 2枚ペア最適化】1枚単体 vs 2枚ペアの合計実効威力を比較して最良コンボを選出
-    // 例：2コスSL主将(上限2.0C)なら「2コス錬鏡1枚(100%)」と「1コス帝明鏡2枚(80%+80%=160%)」を比較し、強い方を選ぶ
-    // =========================================================================
     function findBestAdjutantCombo(masterCard, mirrorPool, fixedAdjutants, usedAdjutantCost, opts) {
         if (!masterCard || isHaBusho(masterCard)) return [];
         var maxFkCost = safeNum(masterCard.maxFukushoCost, 0);
@@ -608,19 +596,39 @@ window.SharedDB = (function() {
                 if (fixedList.some(function(ex) { return ex && ex.name === fkCard.name; })) return null;
             }
 
-            var effRate = inf ? safeNum(elig.rate, 0) : 0;
-            var ratio = effRate / 100;
-            var skillGain = (baseCopyT * ratio) * wTroop + (baseCopyG * ratio) * wGen + (baseCopyRaw * ratio) * wRaw;
-            if (skillGain <= 0 && effRate > 0) {
-                skillGain = effRate * 1000;
+            var effRate = 0;
+            var skillGain = 0;
+
+            if (!isGeneral && inf) {
+                effRate = safeNum(elig.rate, 0);
+                var ratio = effRate / 100;
+                skillGain = (baseCopyT * ratio) * wTroop + (baseCopyG * ratio) * wGen + (baseCopyRaw * ratio) * wRaw;
+                if (skillGain <= 0 && effRate > 0) {
+                    skillGain = effRate * 1000;
+                }
+            } else if (isGeneral) {
+                var genT = safeNum(rawItem.genTMult, 0);
+                var genG = safeNum(rawItem.genGMult, 0);
+                var genRaw = safeNum(rawItem.genRaw, 0);
+                if (genT <= 0 && genG <= 0 && genRaw <= 0) {
+                    return null;
+                }
+                skillGain = (genT * wTroop) + (genG * wGen) + (genRaw * wRaw);
             }
+
             var statGain = safeNum(elig.atkBonus, 0) * wAtk + safeNum(elig.defBonus, 0) * wDef + safeNum(elig.spdBonus, 0) * wSpd;
             var senkyoBonus = (inf && inf.type === 'senkyo') ? 50000000 : 0;
-            var genSlotBonus = isGeneral ? 500 : 0;
+            var totalGain = skillGain + statGain + senkyoBonus;
+            if (totalGain <= 0) return null;
 
-            var dispLabel = inf ? elig.label : ((elig.isBu ? '[武]' : elig.isEi ? '[鋭]' : '') + '一般副将');
-            if (inf && inf.type === 'meikyo' && Math.abs(effRate - safeNum(inf.rate, 80)) > 0.05) {
-                dispLabel = inf.label + '→' + (Math.round(effRate * 10) / 10) + '%';
+            var dispLabel = '';
+            if (inf) {
+                dispLabel = elig.label;
+                if (inf.type === 'meikyo' && Math.abs(effRate - safeNum(inf.rate, 80)) > 0.05) {
+                    dispLabel = inf.label + '→' + (Math.round(effRate * 10) / 10) + '%';
+                }
+            } else {
+                dispLabel = rawItem.label || ((elig.isBu ? '[武]' : elig.isEi ? '[鋭]' : '') + '副将スキル');
             }
 
             return {
@@ -638,8 +646,10 @@ window.SharedDB = (function() {
                 spdBonus: safeNum(elig.spdBonus, 0),
                 label: dispLabel,
                 copyRate: effRate,
+                isGeneralSkill: Boolean(isGeneral),
+                genStats: isGeneral ? (rawItem.genStats || null) : null,
                 info: inf,
-                gain: skillGain + statGain + senkyoBonus + genSlotBonus
+                gain: totalGain
             };
         };
 
@@ -657,7 +667,7 @@ window.SharedDB = (function() {
         if (validList.length === 0) return [];
 
         validList.sort(function(a, b) { return b.gain - a.gain; });
-        var topCands = validList.slice(0, Math.min(30, validList.length));
+        var topCands = validList.slice(0, Math.min(35, validList.length));
 
         var bestCombo = [topCands[0]];
         var bestTotalGain = topCands[0].gain;

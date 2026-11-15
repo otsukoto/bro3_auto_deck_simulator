@@ -1,6 +1,6 @@
-// @version 1.0
 // ========================================================
-// 【共有UIモジュール】元デザイン・オンマウス完全復元 ＋ 配布向け.txt出力・2段階ソート・60枚ページ分割版
+// 【共有UIモジュール】js/shared-ui.js (Ver. 1.01)
+// 役割：カードビジュアル描画、画像キャッシュ・低負荷キュー制御、図鑑ページング・ソート、.txt画像リスト出力
 // ========================================================
 window.SharedUI = (function() {
     var imgLoadMode = 'AUTO';
@@ -733,7 +733,6 @@ window.SharedUI = (function() {
         return '<div class="flex flex-wrap justify-between items-center text-[9px] font-mono mt-0.5 pt-0.5 border-t border-gray-800/80 gap-x-1">' + parts.join('') + '</div>';
     }
 
-    // （updateExcludedBadge は全タブ連動対応版）
     function updateExcludedBadge() {
         var count = AppCards.excludedCardIds.size;
         var prefixes = ['solo', 'lead', 'def', 'hokubatsu', 'hoku', 'list'];

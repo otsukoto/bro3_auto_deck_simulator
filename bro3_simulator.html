@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ブラウザ三国志 統合デッキシミュレータ (引率 ＆ 単騎 ＆ 防御 ＆ 北伐) v1.0</title>
+    <title>ブラウザ三国志 統合デッキシミュレータ Ver. 1.01 (単騎 ＆ 引率 ＆ 兵士防御 ＆ 北伐)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = { darkMode: 'class', theme: { extend: { colors: { sangoku: { gold: '#dfb248', dark: '#121318', cardBg: '#1c1e26', cardBorder: '#2e3240', sl: '#9333ea', l: '#fbbf24', ur: '#3b82f6', sr: '#f97316', r: '#ef4444', uc: '#06b6d4', c: '#eab308' } } } } }
@@ -54,8 +54,11 @@
                     <i class="fa-solid fa-dragon text-xl"></i>
                 </div>
                 <div>
-                    <h1 class="text-xl font-bold tracking-wide text-sangoku-gold">ブラウザ三国志</h1>
-                    <p class="text-xs text-gray-400">統合デッキ最適化シミュレータ (単騎 ＆ 引率 ＆ 防御 ＆ 北伐)</p>
+                    <div class="flex items-center space-x-2">
+                        <h1 class="text-xl font-bold tracking-wide text-sangoku-gold">ブラウザ三国志</h1>
+                        <span class="text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.5 rounded">Ver. 1.01</span>
+                    </div>
+                    <p class="text-xs text-gray-400">統合デッキ最適化シミュレータ (単騎 ＆ 引率 ＆ 兵士防御 ＆ 北伐)</p>
                 </div>
             </div>
 
@@ -143,7 +146,7 @@
                     <i class="fa-solid fa-users-rays"></i><span>引率火力 最適化</span>
                 </button>
                 <button class="nav-tab px-5 py-3 text-sm font-bold border-b-2 border-transparent text-gray-400 hover:text-gray-200 transition flex items-center space-x-2 cursor-pointer" data-tab="def">
-                    <i class="fa-solid fa-shield-halved"></i><span>防御火力 最適化</span>
+                    <i class="fa-solid fa-shield-halved"></i><span>兵士防御 最適化</span>
                 </button>
                 <button class="nav-tab px-5 py-3 text-sm font-bold border-b-2 border-transparent text-gray-400 hover:text-gray-200 transition flex items-center space-x-2 cursor-pointer" data-tab="hokubatsu">
                     <i class="fa-solid fa-flag"></i><span>北伐 最適化</span>
@@ -368,13 +371,13 @@
                 <div id="leadDeckResultArea" class="space-y-6"></div>
             </div>
 
-            <!-- 3. 防御火力 最適化タブ -->
+            <!-- 3. 兵士防御 最適化タブ -->
             <div id="tab-def" class="tab-content hidden space-y-6">
                 <div class="bg-sangoku-cardBg border border-sangoku-cardBorder p-5 rounded-2xl shadow-md">
                     <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
                         <div class="flex flex-wrap items-center gap-2">
                             <h2 class="text-base font-bold text-white flex items-center space-x-2">
-                                <i class="fa-solid fa-shield-halved text-sky-400"></i><span>防御シミュレーション条件</span>
+                                <i class="fa-solid fa-shield-halved text-sky-400"></i><span>兵士防御シミュレーション条件</span>
                             </h2>
                             <span class="text-xs bg-sky-950/80 border border-sky-500/50 text-sky-300 px-2.5 py-0.5 rounded font-bold">拠点防衛 ＆ 南蛮防衛</span>
                             <div id="defExcludedInfoBadge" class="hidden text-xs bg-red-950/70 border border-red-500/50 text-red-300 px-2.5 py-0.5 rounded-lg flex items-center space-x-2">
@@ -526,10 +529,10 @@
 
                     <div class="flex justify-between items-center pt-3 mt-3 border-t border-gray-800">
                         <div class="text-[11px] text-gray-400">
-                            <i class="fa-solid fa-fort-awesome text-sky-400 mr-1"></i>南蛮モードON時は高コストパッシブ武将5人を「南蛮太守」へコスト0配置し、空きコストで防御力を最大化します。
+                            <i class="fa-solid fa-fort-awesome text-sky-400 mr-1"></i>南蛮モードON時は高コストパッシブ武将5人を「南蛮太守」へコスト0配置し、空きコストで兵士防御力を最大化します。
                         </div>
                         <button onclick="DefEngine.run(true)" class="bg-gradient-to-r from-sky-600 to-indigo-600 hover:from-sky-500 hover:to-indigo-500 text-white font-bold text-sm px-8 py-2 rounded-xl shadow-lg transition flex items-center space-x-2 cursor-pointer">
-                            <i class="fa-solid fa-calculator"></i><span>防御火力を再計算する</span>
+                            <i class="fa-solid fa-calculator"></i><span>兵士防御を再計算する</span>
                         </button>
                     </div>
                 </div>
@@ -760,7 +763,7 @@
                         } else if (tab.dataset.tab === 'def') {
                             var areaD = document.getElementById('defDeckResultArea');
                             if (!areaD || areaD.innerHTML.trim() === '') {
-                                AppCards.setStatusLog("防御最適化計算を準備中...");
+                                AppCards.setStatusLog("兵士防御最適化計算を準備中...");
                                 setTimeout(function() { DefEngine.run(true); }, 16);
                             }
                         } else if (tab.dataset.tab === 'hokubatsu') {
