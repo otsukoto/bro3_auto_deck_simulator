@@ -1,6 +1,6 @@
 // ========================================================
-// 【北伐統合デッキ計算エンジン】js/engine-hokubatsu.js (Ver. 1.01)
-// 役割：北伐引率・単騎統合デッキ最適化、全アクティブ同時発動、一般副将役割別評価（「攻:」持ちサポート誤爆防止）＆合計値比較
+// 【北伐統合デッキ計算エンジン】js/engine-hokubatsu.js (Ver. 1.02)
+// 役割：北伐引率・単騎統合デッキ最適化、全アクティブ同時発動、重複ゼロ保証副将プール＆一般副将役割別評価
 // ========================================================
 window.HokubatsuEngine = (function() {
     var isBuff10 = false;
@@ -845,7 +845,7 @@ window.HokubatsuEngine = (function() {
         try {
             var uCards = AppCards.userCards;
             if (!uCards || uCards.length === 0) return;
-            AppCards.setStatusLog("北伐統合デッキ最適化計算中... (" + uCards.length + "枚・副将役割別評価/合計値比較対応)");
+            AppCards.setStatusLog("北伐統合デッキ最適化計算中... (" + uCards.length + "枚・重複ゼロ保証副将プール対応)");
 
             var elTroop = document.getElementById('hokuLeadTroop');
             var elAdjMode = document.getElementById('hokuAdjutantMode');
@@ -863,101 +863,10 @@ window.HokubatsuEngine = (function() {
                 return true;
             });
 
-            var allMirrorPool = [];
-            var allGeneralPool = [];
-            var topMirrorCountByNo = Object.create(null);
-            var topGeneralCountByNo = Object.create(null);
-
-            uCards.forEach(function(c) {
-                if (AppCards.excludedCardIds.has(c.uniqueId)) return;
-                var inf = SharedDB.getMirrorSkillInfo(c);
-                var cNo = String(c.cardNo || '').replace(/[^0-9]/g, '').trim();
-                if (inf) {
-                    if (cNo) topMirrorCountByNo[cNo] = (topMirrorCountByNo[cNo] || 0) + 1;
-                    allMirrorPool.push({ card: c, info: inf, uniqueId: c.uniqueId, cardNo: cNo || c.uniqueId });
-                } else {
-                    if (cNo) topGeneralCountByNo[cNo] = (topGeneralCountByNo[cNo] || 0) + 1;
-                    allGeneralPool.push(c);
-                }
-            });
-
-            if (isReassign) {
-                var fkMirrorSeenByNo = Object.create(null);
-                var fkGeneralSeenByNo = Object.create(null);
-                uCards.forEach(function(c) {
-                    if (AppCards.excludedCardIds.has(c.uniqueId)) return;
-                    if (!Array.isArray(c.fukusho)) return;
-                    c.fukusho.forEach(function(fk, fIdx) {
-                        if (!fk || typeof fk !== 'object') return;
-                        var infFk = SharedDB.getMirrorSkillInfo(fk);
-                        var fkNo = String(fk.cardNo || '').replace(/[^0-9]/g, '').trim();
-                        if (!fkNo && fk.imageSrc) {
-                            var mImg = String(fk.imageSrc).match(/\/([0-9]+)_/);
-                            if (mImg) fkNo = mImg[1];
-                        }
-
-                        if (infFk) {
-                            var isExtraUnlisted = false;
-                            if (fkNo) {
-                                fkMirrorSeenByNo[fkNo] = (fkMirrorSeenByNo[fkNo] || 0) + 1;
-                                if (fkMirrorSeenByNo[fkNo] > (topMirrorCountByNo[fkNo] || 0)) {
-                                    isExtraUnlisted = true;
-                                }
-                            } else if (infFk.type === 'senkyo') {
-                                isExtraUnlisted = true;
-                            }
-
-                            if (isExtraUnlisted) {
-                                var fkUid = String(fk.uniqueId || ('fk_extra_m_' + c.uniqueId + '_' + fIdx + '_' + (fkNo || fk.name)));
-                                allMirrorPool.push({
-                                    card: {
-                                        uniqueId: fkUid,
-                                        cardNo: fkNo || fkUid,
-                                        name: fk.name || '副将',
-                                        rarity: infFk.rarity,
-                                        cost: SharedDB.safeNum(fk.cost, 1.0),
-                                        originalCost: SharedDB.safeNum(fk.cost, 1.0),
-                                        baseAttack: SharedDB.safeNum(fk.baseAttack !== undefined ? fk.baseAttack : fk.attack, 0),
-                                        intelligence: SharedDB.safeNum(fk.intelligence, 0),
-                                        speed: SharedDB.safeNum(fk.speed, 15),
-                                        imageSrc: fk.imageSrc || '',
-                                        skills: fk.skills || [{ name: infFk.label, description: '' }],
-                                        country: fk.country || infFk.force || '他'
-                                    },
-                                    info: infFk,
-                                    uniqueId: fkUid,
-                                    cardNo: fkNo || fkUid
-                                });
-                            }
-                        } else {
-                            var isExtraGen = false;
-                            if (fkNo) {
-                                fkGeneralSeenByNo[fkNo] = (fkGeneralSeenByNo[fkNo] || 0) + 1;
-                                if (fkGeneralSeenByNo[fkNo] > (topGeneralCountByNo[fkNo] || 0)) {
-                                    isExtraGen = true;
-                                }
-                            }
-                            if (isExtraGen) {
-                                var fkGenUid = String(fk.uniqueId || ('fk_extra_g_' + c.uniqueId + '_' + fIdx + '_' + (fkNo || fk.name)));
-                                allGeneralPool.push({
-                                    uniqueId: fkGenUid,
-                                    cardNo: fkNo || fkGenUid,
-                                    name: fk.name || '副将',
-                                    rarity: String(fk.rarity || c.rarity || 'SL').toUpperCase(),
-                                    cost: SharedDB.safeNum(fk.cost, 1.0),
-                                    originalCost: SharedDB.safeNum(fk.cost, 1.0),
-                                    baseAttack: SharedDB.safeNum(fk.baseAttack !== undefined ? fk.baseAttack : fk.attack, 500),
-                                    intelligence: SharedDB.safeNum(fk.intelligence, 15),
-                                    speed: SharedDB.safeNum(fk.speed, 15),
-                                    imageSrc: fk.imageSrc || '',
-                                    skills: fk.skills || [],
-                                    country: fk.country || c.country || '他'
-                                });
-                            }
-                        }
-                    });
-                });
-            }
+            // 重複ゼロ保証の副将プール一元構築（帝仙鏡・水鏡等の二重カウント完全防止）
+            var unifiedPools = SharedDB.buildUnifiedAdjutantPools(uCards, AppCards.excludedCardIds, isReassign);
+            var allMirrorPool = unifiedPools.mirrorPool;
+            var allGeneralPool = unifiedPools.generalPool;
 
             var teisenMirrors = isReassign ? allMirrorPool.filter(function(m) { return m.info && m.info.type === 'senkyo'; }) : [];
             var usedTeisenIds = new Set();
@@ -1378,7 +1287,7 @@ window.HokubatsuEngine = (function() {
 
             currentHokuSetup = setup;
             render(setup);
-            AppCards.setStatusLog("北伐統合最適化完了（一般副将役割別評価・合計値比較対応 ／ エース・前衛・後衛: " + unifiedAdj.frontBackUsedCount + "枚 ／ 速度陣余り: " + unifiedAdj.speedLeftoverUsedCount + "枚）");
+            AppCards.setStatusLog("北伐統合最適化完了（重複ゼロ保証副将プール対応 ／ エース・前衛・後衛: " + unifiedAdj.frontBackUsedCount + "枚 ／ 速度陣余り: " + unifiedAdj.speedLeftoverUsedCount + "枚）");
         } catch (err) {
             console.error("HokubatsuEngine.run Error:", err);
             AppCards.setStatusLog("北伐計算エラー: " + err.message, true);

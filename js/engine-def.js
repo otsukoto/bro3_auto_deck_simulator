@@ -1,6 +1,6 @@
 // ========================================================
-// 【兵士防御計算エンジン】js/engine-def.js (Ver. 1.01)
-// 役割：拠点防衛・南蛮太守5枠最適化、一般武将アクティブ1つ制限・覇全アクティブ同時、SL2枚ペア＆一般副将合計値比較
+// 【兵士防御計算エンジン】js/engine-def.js (Ver. 1.02)
+// 役割：拠点防衛・南蛮太守5枠最適化、一般武将アクティブ1つ制限・覇全アクティブ同時、重複ゼロ保証副将プール＆一般副将合計値比較
 // ========================================================
 window.DefEngine = (function() {
     var isDefBuff10 = false;
@@ -409,52 +409,10 @@ window.DefEngine = (function() {
                 return true;
             });
 
-            var allMirrorPool = [];
-            var seenMirrorKeys = new Set();
-            uCards.forEach(function(c) {
-                if (AppCards.excludedCardIds.has(c.uniqueId)) return;
-                var inf = SharedDB.getMirrorSkillInfo(c);
-                if (inf) {
-                    var cid = String(c.uniqueId || c.cardNo || allMirrorPool.length);
-                    if (!seenMirrorKeys.has(cid)) {
-                        seenMirrorKeys.add(cid);
-                        allMirrorPool.push({ card: c, info: inf, uniqueId: cid, cardNo: c.cardNo || cid });
-                    }
-                }
-            });
-
-            uCards.forEach(function(c) {
-                var fks = c.fukusho || [];
-                for (var fi = 0; fi < fks.length; fi++) {
-                    var fk = fks[fi];
-                    if (!fk || typeof fk !== 'object') continue;
-                    var inf2 = SharedDB.getMirrorSkillInfo(fk);
-                    if (inf2) {
-                        var fkid = String(fk.uniqueId || fk.id || fk.cardNo || allMirrorPool.length);
-                        if (!seenMirrorKeys.has(fkid)) {
-                            seenMirrorKeys.add(fkid);
-                            allMirrorPool.push({
-                                card: {
-                                    uniqueId: fkid,
-                                    cardNo: fk.cardNo || fkid,
-                                    name: fk.name || '副将',
-                                    rarity: inf2.rarity,
-                                    cost: SharedDB.safeNum(fk.cost, 4.0),
-                                    originalCost: SharedDB.safeNum(fk.cost, 4.0),
-                                    baseDefense: SharedDB.safeNum(fk.baseDefense !== undefined ? fk.baseDefense : fk.defense, 0),
-                                    intelligence: SharedDB.safeNum(fk.intelligence, 0),
-                                    imageSrc: fk.imageSrc || '',
-                                    skills: [{ name: inf2.label, description: '' }],
-                                    country: fk.country || inf2.force || '他'
-                                },
-                                info: inf2,
-                                uniqueId: fkid,
-                                cardNo: fk.cardNo || fkid
-                            });
-                        }
-                    }
-                }
-            });
+            // 重複ゼロ保証の副将プール一元構築（帝仙鏡・水鏡等の二重カウント完全防止）
+            var unifiedPools = SharedDB.buildUnifiedAdjutantPools(uCards, AppCards.excludedCardIds, isReassignMode);
+            var allMirrorPool = unifiedPools.mirrorPool;
+            var allGeneralPool = unifiedPools.generalPool;
 
             var effectiveCostMap = Object.create(null);
             validCards.forEach(function(c) {
@@ -805,12 +763,10 @@ window.DefEngine = (function() {
                 var availableMirrors = allMirrorPool.filter(function(m) {
                     return !allDeckUsedIds.has(m.uniqueId) && !allDeckUsedNos.has(m.cardNo) && !usedTeisenCardIds.has(m.uniqueId);
                 });
-                var availableGeneralPool = validCards.filter(function(gc) {
+                var availableGeneralPool = allGeneralPool.filter(function(gc) {
                     return !allDeckUsedIds.has(gc.uniqueId) &&
                            !allDeckUsedNos.has(gc.cardNo || gc.uniqueId) &&
-                           !usedTeisenCardIds.has(gc.uniqueId) &&
-                           !SharedDB.getMirrorSkillInfo(gc) &&
-                           !SharedDB.isMirrorCard(gc.name);
+                           !usedTeisenCardIds.has(gc.uniqueId);
                 });
 
                 var troopDefWeight = Math.max(1000, (targetTroopData.defense * troopCount) / 100);

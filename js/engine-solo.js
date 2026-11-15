@@ -1,6 +1,6 @@
 // ========================================================
-// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 1.01)
-// 役割：単騎エース・内政・パッシブ・警護デッキ最適化、7兵科別比較、SL2枚ペア＆一般副将合計値比較
+// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 1.02)
+// 役割：単騎エース・内政・パッシブ・警護デッキ最適化、7兵科別比較、重複ゼロ保証副将プール＆SL2枚ペア最適化
 // ========================================================
 window.SoloEngine = (function() {
     var isBuff10 = false;
@@ -411,45 +411,13 @@ window.SoloEngine = (function() {
             var originSlotId = isHonkyoAttack ? 'h0' : 'k0';
             var originLimit = isHonkyoAttack ? honkyoLimit : kyotenLimit;
 
+            var isReassignMode = (adjutantMode !== 'CURRENT');
             var validCards = uCards.filter(function(c) { return !c.isAdjutant && !AppCards.excludedCardIds.has(c.uniqueId); });
 
-            var allMirrorPool = [];
-            var seenMirrorKeys = new Set();
-            uCards.forEach(function(c) {
-                if (AppCards.excludedCardIds.has(c.uniqueId)) return;
-                var inf = SharedDB.getMirrorSkillInfo(c);
-                if (inf) {
-                    var cid = String(c.uniqueId || c.cardNo || allMirrorPool.length);
-                    if (!seenMirrorKeys.has(cid)) { seenMirrorKeys.add(cid); allMirrorPool.push({ card: c, info: inf, uniqueId: cid, cardNo: c.cardNo || cid }); }
-                }
-            });
-
-            uCards.forEach(function(c) {
-                var fks = c.fukusho || [];
-                for (var fi = 0; fi < fks.length; fi++) {
-                    var fk = fks[fi];
-                    if (!fk || typeof fk !== 'object') continue;
-                    var inf2 = SharedDB.getMirrorSkillInfo(fk);
-                    if (inf2) {
-                        var fkid = String(fk.uniqueId || fk.id || fk.cardNo || allMirrorPool.length);
-                        if (!seenMirrorKeys.has(fkid)) {
-                            seenMirrorKeys.add(fkid);
-                            allMirrorPool.push({
-                                card: {
-                                    uniqueId: fkid, cardNo: fk.cardNo || fkid, name: fk.name || '副将',
-                                    rarity: inf2.rarity, cost: SharedDB.safeNum(fk.cost, 4.0),
-                                    originalCost: SharedDB.safeNum(fk.cost, 4.0),
-                                    baseAttack: SharedDB.safeNum(fk.baseAttack !== undefined ? fk.baseAttack : fk.attack, 0),
-                                    intelligence: SharedDB.safeNum(fk.intelligence, 0),
-                                    imageSrc: fk.imageSrc || '', skills: [{ name: inf2.label, description: '' }],
-                                    country: fk.country || inf2.force || '他'
-                                },
-                                info: inf2, uniqueId: fkid, cardNo: fk.cardNo || fkid
-                            });
-                        }
-                    }
-                }
-            });
+            // 重複ゼロ保証の副将プール一元構築（帝仙鏡・水鏡等の二重カウント完全防止）
+            var unifiedPools = SharedDB.buildUnifiedAdjutantPools(uCards, AppCards.excludedCardIds, isReassignMode);
+            var allMirrorPool = unifiedPools.mirrorPool;
+            var allGeneralPool = unifiedPools.generalPool;
 
             var effectiveCostMap = Object.create(null);
             validCards.forEach(function(c) {
@@ -464,7 +432,7 @@ window.SoloEngine = (function() {
 
             var preTeisenAssignedMap = Object.create(null);
             var usedTeisenCardIds = new Set();
-            if (adjutantMode !== 'CURRENT') {
+            if (isReassignMode) {
                 var teisenFkCards = allMirrorPool.filter(function(m) { return m.info && m.info.type === 'senkyo'; });
                 var teisenCandidateList = validCards.filter(function(c) {
                     var origC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
@@ -897,12 +865,10 @@ window.SoloEngine = (function() {
                     var availableMirrors = allMirrorPool.filter(function(m) {
                         return !allDeckUsedCardIds.has(m.uniqueId) && !allDeckUsedCardNos.has(m.cardNo) && !usedTeisenCardIds.has(m.uniqueId);
                     });
-                    var availableGeneralPool = validCards.filter(function(gc) {
+                    var availableGeneralPool = allGeneralPool.filter(function(gc) {
                         return !allDeckUsedCardIds.has(gc.uniqueId) &&
                                !allDeckUsedCardNos.has(gc.cardNo || gc.uniqueId) &&
-                               !usedTeisenCardIds.has(gc.uniqueId) &&
-                               !SharedDB.getMirrorSkillInfo(gc) &&
-                               !SharedDB.isMirrorCard(gc.name);
+                               !usedTeisenCardIds.has(gc.uniqueId);
                     });
 
                     masterList.forEach(function(master) {

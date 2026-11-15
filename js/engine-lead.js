@@ -1,6 +1,6 @@
 // ========================================================
-// 【引率火力計算エンジン】js/engine-lead.js (Ver. 1.01)
-// 役割：引率エース・内政・パッシブ・警護デッキ最適化、単騎専用サポート除外、SL2枚ペア＆一般副将合計値比較
+// 【引率火力計算エンジン】js/engine-lead.js (Ver. 1.02)
+// 役割：引率エース・内政・パッシブ・警護デッキ最適化、単騎専用サポート除外、重複ゼロ保証副将プール＆一般副将合計値比較
 // ========================================================
 window.LeadEngine = (function() {
     var isLeadHighland = false;
@@ -187,35 +187,33 @@ window.LeadEngine = (function() {
         var sName = String(s0.name || '').trim();
         if (!sName || sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || isDuelSkill(s0)) return null;
 
-        var isAttackFirst = (sName.indexOf('攻:') === 0 || sName.indexOf('副攻:') === 0 || sName.indexOf('攻防:') === 0);
-        // サポート陣(masterRole !== 'lead')には「攻:」第1スキル持ち一般武将をつけない
-        if (masterRole !== 'lead' && isAttackFirst) {
-            return null;
-        }
+        var isAttackFirst = (sName.indexOf('攻:') === 0 || sName.indexOf('副攻:') === 0 || sName.indexOf('攻防:') === 0 || sName.indexOf('副攻防:') === 0);
 
-        var parseMode = (masterRole === 'lead') ? 'lead' : 'support';
-        var p0 = parseLeadSkill(s0, targetTroopData, weatherObj, parseMode, leadCard);
-        if (masterRole !== 'lead' && p0.tMult <= 0) {
-            return null;
-        }
-        if (p0.tMult <= 0 && p0.gMult <= 0) {
-            return null;
-        }
+        // 内政官・サポート(masterRole !== 'lead')には「攻:」第1スキル持ちを絶対につけない
+        if (masterRole !== 'lead' && isAttackFirst) return null;
+
+        var evalMode = (masterRole === 'lead') ? 'lead' : 'support';
+        var p0 = parseLeadSkill(s0, targetTroopData, weatherObj, evalMode, leadCard);
+        var tVal = SharedDB.safeNum(p0.tMult, 0);
+        var gVal = (masterRole === 'lead') ? SharedDB.safeNum(p0.gMult, 0) : 0;
+
+        // サポート陣の一般副将には兵士攻撃力上昇(tVal > 0)を持つスキルのみ許可
+        if (masterRole !== 'lead' && tVal <= 0) return null;
+        if (tVal <= 0 && gVal <= 0) return null;
 
         var cleanSName = sName.replace(/^(?:攻防|攻|防|変|副攻|副防|副変):/, '').replace(/LV[0-9]+$/i, '');
-        var badge = (p0.tMult > 0)
-            ? ('[副]' + cleanSName + ' 兵+' + SharedDB.formatBuffNum(p0.tMult) + '%')
-            : ('[副]' + cleanSName + ' 将+' + SharedDB.formatBuffNum(p0.gMult) + '%');
+        var badge = (tVal > 0)
+            ? ('[副]' + cleanSName + ' 兵+' + SharedDB.formatBuffNum(tVal) + '%')
+            : ('[副]' + cleanSName + ' 将+' + SharedDB.formatBuffNum(gVal) + '%');
 
         return {
             card: gCard,
             uniqueId: gCard.uniqueId,
             cardNo: gCard.cardNo,
-            genTMult: p0.tMult,
-            genGMult: p0.gMult,
-            genRaw: 0,
+            genTMult: tVal,
+            genGMult: gVal,
             label: badge,
-            genStats: { leadT: p0.tMult, leadG: p0.gMult }
+            genStats: { leadT: tVal, leadG: gVal }
         };
     }
 
@@ -398,52 +396,10 @@ window.LeadEngine = (function() {
             var isReassignMode = (leadAdjutantMode !== 'CURRENT');
             var validCards = uCards.filter(function(c) { return !c.isAdjutant && !AppCards.excludedCardIds.has(c.uniqueId); });
 
-            var allMirrorPool = [];
-            var seenMirrorKeys = new Set();
-            uCards.forEach(function(c) {
-                if (AppCards.excludedCardIds.has(c.uniqueId)) return;
-                var inf = SharedDB.getMirrorSkillInfo(c);
-                if (inf) {
-                    var cid = String(c.uniqueId || c.cardNo || allMirrorPool.length);
-                    if (!seenMirrorKeys.has(cid)) {
-                        seenMirrorKeys.add(cid);
-                        allMirrorPool.push({ card: c, info: inf, uniqueId: cid, cardNo: c.cardNo || cid });
-                    }
-                }
-            });
-
-            uCards.forEach(function(c) {
-                var fks = c.fukusho || [];
-                for (var fi = 0; fi < fks.length; fi++) {
-                    var fk = fks[fi];
-                    if (!fk || typeof fk !== 'object') continue;
-                    var inf2 = SharedDB.getMirrorSkillInfo(fk);
-                    if (inf2) {
-                        var fkid = String(fk.uniqueId || fk.id || fk.cardNo || allMirrorPool.length);
-                        if (!seenMirrorKeys.has(fkid)) {
-                            seenMirrorKeys.add(fkid);
-                            allMirrorPool.push({
-                                card: {
-                                    uniqueId: fkid,
-                                    cardNo: fk.cardNo || fkid,
-                                    name: fk.name || '副将',
-                                    rarity: inf2.rarity,
-                                    cost: SharedDB.safeNum(fk.cost, 4.0),
-                                    originalCost: SharedDB.safeNum(fk.cost, 4.0),
-                                    baseAttack: SharedDB.safeNum(fk.baseAttack !== undefined ? fk.baseAttack : fk.attack, 0),
-                                    intelligence: SharedDB.safeNum(fk.intelligence, 0),
-                                    imageSrc: fk.imageSrc || '',
-                                    skills: [{ name: inf2.label, description: '' }],
-                                    country: fk.country || inf2.force || '他'
-                                },
-                                info: inf2,
-                                uniqueId: fkid,
-                                cardNo: fk.cardNo || fkid
-                            });
-                        }
-                    }
-                }
-            });
+            // 重複ゼロ保証の副将プール一元構築（帝仙鏡・水鏡等の二重カウント完全防止）
+            var unifiedPools = SharedDB.buildUnifiedAdjutantPools(uCards, AppCards.excludedCardIds, isReassignMode);
+            var allMirrorPool = unifiedPools.mirrorPool;
+            var allGeneralPool = unifiedPools.generalPool;
 
             var effectiveCostMap = Object.create(null);
             validCards.forEach(function(c) {
@@ -911,15 +867,14 @@ window.LeadEngine = (function() {
                     var availableMirrors = allMirrorPool.filter(function(m) {
                         return !allDeckUsedIds.has(m.uniqueId) && !allDeckUsedNos.has(m.cardNo) && !usedTeisenCardIds.has(m.uniqueId);
                     });
-                    var availableGeneralPool = validCards.filter(function(gc) {
+                    var availableGeneralPool = allGeneralPool.filter(function(gc) {
                         return !allDeckUsedIds.has(gc.uniqueId) &&
                                !allDeckUsedNos.has(gc.cardNo || gc.uniqueId) &&
-                               !usedTeisenCardIds.has(gc.uniqueId) &&
-                               !SharedDB.getMirrorSkillInfo(gc) &&
-                               !SharedDB.isMirrorCard(gc.name);
+                               !usedTeisenCardIds.has(gc.uniqueId);
                     });
 
                     var troopWeight = (targetTroopData.attack * troopCount) / 100;
+                    var leadBestW = leadItem.bestWeather || 'SUN';
 
                     masterList.forEach(function(master) {
                         var mCard = master.card;
@@ -939,7 +894,7 @@ window.LeadEngine = (function() {
                                 currentAssigned.push({
                                     name: tCard.name || '副将の帝仙鏡',
                                     cardNo: tCard.cardNo || '',
-                                    imageSrc: tCard.imageSrc || (tCard.cardNo ? 'https://3gokushi.jp/img/card/card_' + tCard.cardNo + '.jpg' : ''),
+                                    imageSrc: tCard.imageSrc || (tCard.cardNo ? '[https://3gokushi.jp/img/card/card](https://3gokushi.jp/img/card/card)_' + tCard.cardNo + '.jpg' : ''),
                                     rarity: 'SL',
                                     cost: tCost,
                                     baseAttack: SharedDB.safeNum(tCard.baseAttack, 0),
@@ -967,7 +922,7 @@ window.LeadEngine = (function() {
                             var gc = availableGeneralPool[gi];
                             var gcNo = gc.cardNo || gc.uniqueId;
                             if (usedMirrorIds.has(gc.uniqueId) || usedMirrorNos.has(gcNo)) continue;
-                            var gCand = buildLeadGeneralAdjutantCand(gc, master.role, targetTroopData, leadItem.bestWeather, leadCard);
+                            var gCand = buildLeadGeneralAdjutantCand(gc, master.role, targetTroopData, leadBestW, leadCard);
                             if (gCand) validGenCands.push(gCand);
                         }
 

@@ -1,6 +1,6 @@
 // ========================================================
-// 【共有データベースモジュール】js/shared-database.js (Ver. 1.01)
-// 役割：檄令・兵科・副将コピー率テーブル、SL2枚ペア最適化、一般副将第1スキル合計値比較を提供
+// 【共有データベースモジュール】js/shared-database.js (Ver. 1.02)
+// 役割：檄令・兵科・副将コピー率テーブル、重複ゼロ保証の副将プール一元構築、SL2枚ペア最適化、一般副将スキル合計値比較
 // ========================================================
 window.SharedDB = (function() {
     var GEKIREI_TABLES = {
@@ -424,6 +424,7 @@ window.SharedDB = (function() {
         var sDesc = skills.length > 0 && skills[0] ? String(skills[0].description || '').trim() : String(card.skill_desc || card.description || '').trim();
         var sText = sName + " " + sDesc;
 
+        // 1. 帝仙鏡
         if (sName.indexOf("帝仙鏡") !== -1 || (sName.indexOf("仙鏡") !== -1 && sName.indexOf("帝") !== -1) || (sDesc.indexOf("帝仙鏡") !== -1 && sName.indexOf("副将") !== -1)) {
             var stSen = getAdjutantStatusEffect(card, { type: 'senkyo', rarity: 'SL', rate: 100 });
             return {
@@ -433,6 +434,7 @@ window.SharedDB = (function() {
             };
         }
 
+        // 2. 娘将の〇〇錬鏡
         var mMusume = sName.match(/娘将の(帝|天|神|大)?錬鏡/) || sText.match(/娘将の(帝|天|神|大)?錬鏡/);
         if (mMusume) {
             var rCharM = mMusume[1];
@@ -449,6 +451,7 @@ window.SharedDB = (function() {
             };
         }
 
+        // 3. 勢力別錬鏡（蜀・魏・呉・群・他）
         var mRen = sName.match(/(蜀|魏|呉|群|他)将の(帝|天|神|大)?錬鏡/) || sText.match(/(蜀|魏|呉|群|他)将の(帝|天|神|大)?錬鏡/);
         if (mRen) {
             var fChar = mRen[1];
@@ -467,6 +470,7 @@ window.SharedDB = (function() {
             };
         }
 
+        // 4. 明鏡（帝・天・神・大・通常）
         var mMei = sName.match(/(?:副将の)?(帝|天|神|大)?明鏡/) || sText.match(/(?:副将の)?(帝|天|神|大)?明鏡/);
         if (mMei) {
             var rChar2 = mMei[1];
@@ -502,6 +506,123 @@ window.SharedDB = (function() {
             };
         }
         return null;
+    }
+
+    // =========================================================================
+    // 【重複ゼロ保証・副将プール一元構築関数】
+    // JSON内のトップレベル(uCards)と主将のfukusho配列の両方に同一カードが存在する場合の二重カウントを完全に防ぎます。
+    // =========================================================================
+    function getCardSignature(cardObj, rarityHint) {
+        if (!cardObj || typeof cardObj !== 'object') return '';
+        var cNo = String(cardObj.cardNo || cardObj.card_no || '').replace(/[^0-9]/g, '').trim();
+        if (!cNo && cardObj.imageSrc) {
+            var mImg = String(cardObj.imageSrc).match(/\/([0-9]+)_/);
+            if (mImg) cNo = mImg[1];
+        }
+        if (cNo) return 'NO_' + cNo;
+        var nm = String(cardObj.name || '').trim();
+        var rar = String(rarityHint || cardObj.rarity || 'SL').trim().toUpperCase();
+        var cst = safeNum(cardObj.cost, 0);
+        return 'NM_' + nm + '_' + rar + '_' + cst;
+    }
+
+    function buildUnifiedAdjutantPools(uCards, excludedCardIds, isReassignMode) {
+        var mirrorPool = [];
+        var generalPool = [];
+        var topCountBySig = Object.create(null);
+
+        (uCards || []).forEach(function(c) {
+            if (!c || (excludedCardIds && excludedCardIds.has(c.uniqueId))) return;
+            var inf = getMirrorSkillInfo(c);
+            var sig = getCardSignature(c, inf ? inf.rarity : c.rarity);
+            if (sig) {
+                topCountBySig[sig] = (topCountBySig[sig] || 0) + 1;
+            }
+            var cNo = String(c.cardNo || '').replace(/[^0-9]/g, '').trim();
+            if (inf) {
+                mirrorPool.push({
+                    card: c,
+                    info: inf,
+                    uniqueId: String(c.uniqueId || ('m_' + mirrorPool.length)),
+                    cardNo: cNo || String(c.uniqueId || '')
+                });
+            } else {
+                generalPool.push(c);
+            }
+        });
+
+        // 再配分モード時のみ、トップレベル(uCards)に未記載で主将のfukusho内にのみ存在するカードがあれば補完（重複は除外）
+        if (isReassignMode) {
+            var fkSeenCountBySig = Object.create(null);
+            (uCards || []).forEach(function(c) {
+                if (!c || (excludedCardIds && excludedCardIds.has(c.uniqueId))) return;
+                if (!Array.isArray(c.fukusho)) return;
+                c.fukusho.forEach(function(fk, fIdx) {
+                    if (!fk || typeof fk !== 'object') return;
+                    var infFk = getMirrorSkillInfo(fk);
+                    var fkSig = getCardSignature(fk, infFk ? infFk.rarity : fk.rarity);
+                    if (!fkSig) return;
+
+                    fkSeenCountBySig[fkSig] = (fkSeenCountBySig[fkSig] || 0) + 1;
+                    // トップレベルuCardsに既に同数以上存在するなら二重登録しない
+                    if (fkSeenCountBySig[fkSig] <= (topCountBySig[fkSig] || 0)) {
+                        return;
+                    }
+
+                    var fkNo = String(fk.cardNo || '').replace(/[^0-9]/g, '').trim();
+                    if (!fkNo && fk.imageSrc) {
+                        var mImg2 = String(fk.imageSrc).match(/\/([0-9]+)_/);
+                        if (mImg2) fkNo = mImg2[1];
+                    }
+
+                    if (infFk) {
+                        var fkUid = 'fk_only_m_' + String(c.uniqueId) + '_' + fIdx + '_' + (fkNo || fkSig);
+                        mirrorPool.push({
+                            card: {
+                                uniqueId: fkUid,
+                                cardNo: fkNo || fkUid,
+                                name: fk.name || '副将',
+                                rarity: infFk.rarity,
+                                cost: safeNum(fk.cost, 1.0),
+                                originalCost: safeNum(fk.cost, 1.0),
+                                baseAttack: safeNum(fk.baseAttack !== undefined ? fk.baseAttack : fk.attack, 0),
+                                baseDefense: safeNum(fk.baseDefense !== undefined ? fk.baseDefense : fk.defense, 0),
+                                intelligence: safeNum(fk.intelligence, 0),
+                                speed: safeNum(fk.speed, 15),
+                                imageSrc: fk.imageSrc || '',
+                                skills: fk.skills || [{ name: infFk.label, description: '' }],
+                                country: fk.country || infFk.force || '他'
+                            },
+                            info: infFk,
+                            uniqueId: fkUid,
+                            cardNo: fkNo || fkUid
+                        });
+                    } else {
+                        var fkGenUid = 'fk_only_g_' + String(c.uniqueId) + '_' + fIdx + '_' + (fkNo || fkSig);
+                        generalPool.push({
+                            uniqueId: fkGenUid,
+                            cardNo: fkNo || fkGenUid,
+                            name: fk.name || '副将',
+                            rarity: String(fk.rarity || c.rarity || 'SL').toUpperCase(),
+                            cost: safeNum(fk.cost, 1.0),
+                            originalCost: safeNum(fk.cost, 1.0),
+                            baseAttack: safeNum(fk.baseAttack !== undefined ? fk.baseAttack : fk.attack, 500),
+                            baseDefense: safeNum(fk.baseDefense !== undefined ? fk.baseDefense : fk.defense, 500),
+                            intelligence: safeNum(fk.intelligence, 15),
+                            speed: safeNum(fk.speed, 15),
+                            imageSrc: fk.imageSrc || '',
+                            skills: fk.skills || [],
+                            country: fk.country || c.country || '他'
+                        });
+                    }
+                });
+            });
+        }
+
+        return {
+            mirrorPool: mirrorPool,
+            generalPool: generalPool
+        };
     }
 
     function checkAdjutantEligibility(masterCard, fkCard, mirrorInfo, usedAdjutantCost) {
@@ -677,6 +798,7 @@ window.SharedDB = (function() {
                 var c1 = topCands[a];
                 for (var b = a + 1; b < topCands.length; b++) {
                     var c2 = topCands[b];
+                    if (c1 === c2) continue;
                     if (c1.uniqueId && c1.uniqueId === c2.uniqueId) continue;
                     if (!allowSameName) {
                         if (c1.cardNo && c1.cardNo === c2.cardNo) continue;
@@ -761,6 +883,7 @@ window.SharedDB = (function() {
         getKakuseiMultiplier: getKakuseiMultiplier,
         getAdjutantStatusEffect: getAdjutantStatusEffect,
         getMirrorSkillInfo: getMirrorSkillInfo,
+        buildUnifiedAdjutantPools: buildUnifiedAdjutantPools,
         checkAdjutantEligibility: checkAdjutantEligibility,
         findBestAdjutantCombo: findBestAdjutantCombo,
         solveKnapsackDP: solveKnapsackDP,
