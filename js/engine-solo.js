@@ -1,6 +1,6 @@
 // ========================================================
-// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 2.03)　
-// 役割：単騎攻撃・破壊10枠最適化、乗算ダメージ実測フィードバック型2パス反復2次元ナップサックDP（高倍率L覇＆低コスト複数両立）、サポート副将制限
+// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 2.04)
+// 役割：単騎攻撃・破壊10枠最適化、乗算ダメージ実測フィードバック型2パス反復2次元DP、警護デッキ副将の「警悟」スキル限定制限
 // ========================================================
 window.SoloEngine = (function() {
     var isBuff10 = false;
@@ -274,6 +274,8 @@ window.SoloEngine = (function() {
         var gkAdd = (gk0 && gk0.bonus) || 0;
 
         if (masterRole !== 'lead' && (!p0.isSupport || !p0.isPassive)) return null;
+        // 警護デッキに居る主将の一般武将副将は「警悟」（警護デッキセット時）スキルのみ有効
+        if (masterRole === 'guard' && !p0.isGuard) return null;
         if (!isSameBaseAsAce && p0.mustBeSameBase) return null;
 
         var gVal = (masterRole === 'lead') ? SharedDB.safeNum(p0.leadBuff, 0) : SharedDB.safeNum(p0.gMult, 0);
@@ -926,12 +928,6 @@ window.SoloEngine = (function() {
                     }
                 });
 
-                // =====================================================================
-                // 乗算ダメージ実測フィードバック型 2パス反復2次元DP評価関数：
-                // ・Pass 1 の実測有効基礎攻撃力(refEffAtk)と実測総倍率(refTotalMult)および
-                //   実測副将バフ・檄令(adjBuffOverrideMap, adjGkOverrideMap)を反映し、
-                //   真の最終総合攻撃力(finalTotalDamage)が最大の編成を採用！
-                // =====================================================================
                 function evaluateFullSoloPlan(adjBuffOverrideMap, adjGkOverrideMap, refEffAtk, refTotalMult) {
                     var curEffAtk = SharedDB.safeNum(refEffAtk, initEffAtk);
                     var curTotalMult = SharedDB.safeNum(refTotalMult, initTotalMult);
@@ -1238,6 +1234,7 @@ window.SoloEngine = (function() {
                             });
                         }
                     });
+                    // 警護デッキに居る主将は role: 'guard' とし、副将には「警悟」スキル持ちのみ許可
                     hGuardPicked.forEach(function(p) {
                         if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0) {
                             var firstS3 = (p.card.skills && p.card.skills[0]) || {};
@@ -1245,7 +1242,7 @@ window.SoloEngine = (function() {
                             var fG = SharedDB.safeNum(p.firstGMult, 0);
                             var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
                             masterList.push({
-                                role: 'passive', card: p.card, isSameBaseAsAce: isHonkyoAttack,
+                                role: 'guard', card: p.card, isSameBaseAsAce: isHonkyoAttack,
                                 originalCost: SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5),
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 firstSkillVal: fG, baseCopyVal: fG / kMult3, firstSkillObj: firstS3, isGekirei: Boolean(p.isGekirei && fRaw > 0),
@@ -1260,7 +1257,7 @@ window.SoloEngine = (function() {
                             var fG = SharedDB.safeNum(p.firstGMult, 0);
                             var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
                             masterList.push({
-                                role: 'passive', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
+                                role: 'guard', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
                                 originalCost: SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5),
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 firstSkillVal: fG, baseCopyVal: fG / kMult3, firstSkillObj: firstS3, isGekirei: Boolean(p.isGekirei && fRaw > 0),

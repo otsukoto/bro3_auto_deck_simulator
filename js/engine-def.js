@@ -1,6 +1,6 @@
 // ========================================================
-// 【兵士防御計算エンジン】js/engine-def.js (Ver. 2.00)
-// 役割：拠点防衛・南蛮太守5枠最適化、回復／短縮／武将専用スキル除外、2拠点同時DP最適配分（拠点縛り1枠厳密化）・主将コピー反映
+// 【兵士防御計算エンジン】js/engine-def.js (Ver. 2.04)
+// 役割：拠点防衛・南蛮太守5枠最適化、2拠点同時DP最適配分（拠点縛り1枠厳密化）、警護デッキ副将の「警悟」スキル限定制限
 // ========================================================
 window.DefEngine = (function() {
     var isDefBuff10 = false;
@@ -159,8 +159,6 @@ window.DefEngine = (function() {
             return res;
         }
 
-        // ★重要：回復スキル（HPを〜回復）・短縮スキル（時間を〜短縮）・低下デバフを100%除外するため、
-        //   「防御(力)...〇〇%(上昇|増加|増)」の形で上昇/増加する防御バフのみを厳密抽出！
         var tMult = 0, gMult = 0;
         var mBoth = normDesc.match(/(?:全兵士|全ての兵士|すべての兵士|兵士|全軍|全兵科|全拠点|全兵|[^\s、。]+兵)[、，・,\/\s]+(?:[^\s、。]+科)?武将.*?防御(?:力)?(?:全て)?[がをのは]?([0-9\.]+)[%％]\s*(?:上昇|増加|増)/);
         if (mBoth && isTroopComp) {
@@ -185,7 +183,7 @@ window.DefEngine = (function() {
         return res;
     }
 
-    function buildDefGeneralAdjutantCand(gCard, targetTroopData, weatherObj, isExactDefendedBaseSlot) {
+    function buildDefGeneralAdjutantCand(gCard, targetTroopData, weatherObj, isExactDefendedBaseSlot, isGuardMaster) {
         if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
         var skills = gCard.skills || [];
         if (skills.length === 0 || !skills[0]) return null;
@@ -197,6 +195,8 @@ window.DefEngine = (function() {
 
         var p0 = parseDefSkill(s0, targetTroopData, weatherObj);
         if (!p0.isDefSkill || !p0.isPassive || p0.tMult <= 0) return null;
+        // 警護デッキに居る主将の一般武将副将は「警悟」（警護デッキセット時）スキルのみ有効
+        if (isGuardMaster && !p0.isGuardDeck) return null;
 
         if (!isExactDefendedBaseSlot && p0.mustBeSameBase) return null;
 
@@ -364,12 +364,6 @@ window.DefEngine = (function() {
         return { bestWeather: bestW, eval: maxEval };
     }
 
-    // =========================================================================
-    // 2次元ナップサックDP：コスト上限(costLimit) と 内政スロット上限(maxNaiseiSlots)
-    // および 拠点縛り内政上限(maxBoundNaiseiSlots) を同時に満たしながら総合バフを最大化！
-    // → これにより「全拠点有効の1コスパッシブを拠点＋側へ自動移動し、本拠の30C枠に
-    //   拠点縛り武将を新たに設置して防御力を最大化する」配分を厳密に自動計算する！
-    // =========================================================================
     function solveDeckKnapsackWithNaiseiLimits(costLimit, maxNaiseiSlots, maxBoundNaiseiSlots, candidates) {
         var maxW = Math.max(0, Math.round(costLimit * 2));
         var maxN = Math.max(0, maxNaiseiSlots);
@@ -590,7 +584,6 @@ window.DefEngine = (function() {
             var usedNos = new Set();
             var pickedNanbanTaishu = [];
 
-            // 1. 南蛮モード時は、まず全パッシブ候補から高コスト・高バフパッシブを最大5枠「南蛮太守」へ優先配置
             if (isNanbanMode) {
                 var allPassiveForNanban = dedupByCardNo(
                     frontBoundPool.concat(frontGlobalPool).filter(function(x) { return !x.isManualNaisei; }),
@@ -632,18 +625,12 @@ window.DefEngine = (function() {
                 }
             }
 
-            // 2. 本拠(30C) と 拠点＋(25C) の 2拠点同時最適配分（Knapsack DP）：
-            //    ・防衛対象外側の拠点（本拠防衛なら「拠点＋」、拠点＋防衛なら「本拠」）には「全拠点有効カード」のみ効くため、
-            //      まずそちらのコスト枠に「全拠点有効カード（内政＋パッシブ）」を最大限詰め込む！
-            //    ・これにより防衛対象側のコスト枠が空くので、防衛対象拠点でしか効かない「拠点縛りカード（内政最大1枠＋パッシブ）」を
-            //      最大限設置して総合防御力を最大化する！
             var hManualSlots = [];
             var kManualSlots = [];
             var pickedHPassives = [];
             var pickedKPassives = [];
 
             if (isHonkyoDef) {
-                // Step A: 拠点＋(kyotenLimit) に「全拠点有効（内政最大maxKyotenNaisei枠＋パッシブ）」を最適充填
                 var availGlobalsForK = dedupByCardNo(frontGlobalPool, usedNos);
                 var kPickedAll = solveDeckKnapsackWithNaiseiLimits(kyotenLimit, maxKyotenNaisei, 0, availGlobalsForK);
                 kPickedAll.forEach(function(it) {
@@ -652,7 +639,6 @@ window.DefEngine = (function() {
                     else pickedKPassives.push(it);
                 });
 
-                // Step B: 本拠(honkyoLimit) に「残った全拠点有効 ＋ 本拠の拠点縛り（内政最大1枠＋パッシブ）」を最適充填
                 var availForH = dedupByCardNo(frontBoundPool.concat(frontGlobalPool), usedNos);
                 var hPickedAll = solveDeckKnapsackWithNaiseiLimits(honkyoLimit, maxHonkyoNaisei, Math.min(1, maxHonkyoNaisei), availForH);
                 hPickedAll.forEach(function(it) {
@@ -661,8 +647,6 @@ window.DefEngine = (function() {
                     else pickedHPassives.push(it);
                 });
             } else {
-                // 拠点＋防衛時：
-                // Step A: 本拠(honkyoLimit) に「全拠点有効（内政最大maxHonkyoNaisei枠＋パッシブ）」を最適充填
                 var availGlobalsForH = dedupByCardNo(frontGlobalPool, usedNos);
                 var hPickedAll2 = solveDeckKnapsackWithNaiseiLimits(honkyoLimit, maxHonkyoNaisei, 0, availGlobalsForH);
                 hPickedAll2.forEach(function(it) {
@@ -671,7 +655,6 @@ window.DefEngine = (function() {
                     else pickedHPassives.push(it);
                 });
 
-                // Step B: 拠点＋(kyotenLimit) に「残った全拠点有効 ＋ 拠点の拠点縛り（内政最大1枠＋パッシブ）」を最適充填
                 var availForK = dedupByCardNo(frontBoundPool.concat(frontGlobalPool), usedNos);
                 var kPickedAll2 = solveDeckKnapsackWithNaiseiLimits(kyotenLimit, maxKyotenNaisei, Math.min(1, maxKyotenNaisei), availForK);
                 kPickedAll2.forEach(function(it) {
@@ -681,7 +664,6 @@ window.DefEngine = (function() {
                 });
             }
 
-            // 拠点縛り内政官がある場合は必ず防衛拠点スロット（h0 または k0）に配置されるようソート
             hManualSlots.sort(function(a, b) {
                 if (a.isBound !== b.isBound) return a.isBound ? -1 : 1;
                 return b.tMult - a.tMult;
@@ -735,14 +717,16 @@ window.DefEngine = (function() {
                 it.perSameCountryMult = reEv.perSameCountryMult;
                 it.dmgReduce = reEv.dmgReduce;
                 it.isExactDefendedBaseSlot = isHonkyoDef ? (sId === 'h0') : (sId === 'k0');
+                it.isGuardMaster = false;
                 allActiveItems.push(it);
             });
 
-            pickedNanbanTaishu.forEach(function(x) { x.isExactDefendedBaseSlot = true; });
-            pickedHPassives.forEach(function(x) { x.isExactDefendedBaseSlot = isHonkyoDef; });
-            pickedKPassives.forEach(function(x) { x.isExactDefendedBaseSlot = !isHonkyoDef; });
-            pickedHGuards.forEach(function(x) { x.isExactDefendedBaseSlot = isHonkyoDef; });
-            pickedKGuards.forEach(function(x) { x.isExactDefendedBaseSlot = !isHonkyoDef; });
+            pickedNanbanTaishu.forEach(function(x) { x.isExactDefendedBaseSlot = true; x.isGuardMaster = false; });
+            pickedHPassives.forEach(function(x) { x.isExactDefendedBaseSlot = isHonkyoDef; x.isGuardMaster = false; });
+            pickedKPassives.forEach(function(x) { x.isExactDefendedBaseSlot = !isHonkyoDef; x.isGuardMaster = false; });
+            // 警護デッキに居る主将は isGuardMaster = true とし、一般武将副将には「警悟」スキル持ちのみ許可
+            pickedHGuards.forEach(function(x) { x.isExactDefendedBaseSlot = isHonkyoDef; x.isGuardMaster = true; });
+            pickedKGuards.forEach(function(x) { x.isExactDefendedBaseSlot = !isHonkyoDef; x.isGuardMaster = true; });
 
             var allSelectedItems = pickedNanbanTaishu.concat(allActiveItems, pickedHPassives, pickedKPassives, pickedHGuards, pickedKGuards);
 
@@ -769,6 +753,7 @@ window.DefEngine = (function() {
                     masterList.push({
                         card: it.card,
                         isExactDefendedBaseSlot: Boolean(it.isExactDefendedBaseSlot),
+                        isGuardMaster: Boolean(it.isGuardMaster),
                         maxCost: SharedDB.safeNum(it.card.maxFukushoCost, 4.5),
                         baseCopyTVal: SharedDB.safeNum(it.firstTMult, 0) / kMult,
                         baseCopyGVal: SharedDB.safeNum(it.firstGMult, 0) / kMult,
@@ -877,7 +862,7 @@ window.DefEngine = (function() {
                         var gc = availableGeneralPool[gi];
                         var gcNo = gc.cardNo || gc.uniqueId;
                         if (usedMirrorIds.has(gc.uniqueId) || usedMirrorNos.has(gcNo)) continue;
-                        var gCand = buildDefGeneralAdjutantCand(gc, targetTroopData, 'SUN', master.isExactDefendedBaseSlot);
+                        var gCand = buildDefGeneralAdjutantCand(gc, targetTroopData, 'SUN', master.isExactDefendedBaseSlot, master.isGuardMaster);
                         if (gCand) validGenCands.push(gCand);
                     }
 

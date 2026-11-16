@@ -1,6 +1,6 @@
 // ========================================================
-// 【引率火力計算エンジン】js/engine-lead.js (Ver. 2.02)　
-// 役割：引率攻撃・破壊10枠最適化、2パス反復2次元ナップサックDP（副将ミラー実測フィードバックによるSL副将2枠vs覇の厳密比較）、サポート副将制限
+// 【引率火力計算エンジン】js/engine-lead.js (Ver. 2.04)
+// 役割：引率攻撃・破壊10枠最適化、2パス反復2次元ナップサックDP、警護デッキ副将の「警悟」スキル限定制限
 // ========================================================
 window.LeadEngine = (function() {
     var isLeadHighland = false;
@@ -299,6 +299,8 @@ window.LeadEngine = (function() {
         var evalMode = (masterRole === 'lead') ? 'lead' : 'support';
         var p0 = parseLeadSkill(s0, targetTroopData, weatherObj, evalMode, leadCard);
         if (masterRole !== 'lead' && !p0.isPassive) return null;
+        // 警護デッキに居る主将の一般武将副将は「警悟」（警護デッキセット時）スキルのみ有効
+        if (masterRole === 'guard' && !p0.isGuardDeck) return null;
         if (!isSameBaseAsAce && p0.mustBeSameBase) return null;
 
         var tVal = SharedDB.safeNum(p0.tMult, 0);
@@ -555,10 +557,6 @@ window.LeadEngine = (function() {
         };
     }
 
-    // =========================================================================
-    // 2次元ナップサックDP：コスト上限(costLimit) と 内政スロット上限(maxNaiseiSlots)
-    // を同時に満たしながら「低コスト内政官＋低コストパッシブ複数」の総合バフを厳密最大化！
-    // =========================================================================
     function solveLeadDeckKnapsackWithNaiseiLimits(costLimit, maxNaiseiSlots, candidates) {
         var maxW = Math.max(0, Math.round(costLimit * 2));
         var maxN = Math.max(0, maxNaiseiSlots);
@@ -715,7 +713,6 @@ window.LeadEngine = (function() {
                 }
             }
 
-            // 利用可能ミラー鏡の豊富さに応じた初期副将コピー期待係数（Pass 1 用）
             var mirrorCount = allMirrorPool.length;
             var initSlCopyRatio = isReassignMode ? (mirrorCount >= 18 ? 1.55 : (mirrorCount >= 10 ? 1.15 : 0.65)) : 0;
             var initLCopyRatio = isReassignMode ? (mirrorCount >= 18 ? 0.65 : (mirrorCount >= 10 ? 0.45 : 0.25)) : 0;
@@ -881,11 +878,6 @@ window.LeadEngine = (function() {
                 var frontBoundPool = pools.frontBoundPool.filter(function(x) { return x.card.uniqueId !== leadCard.uniqueId && (x.card.cardNo || x.card.uniqueId) !== leadNo && x.tMult > 0; });
                 var guardPool = pools.guardPool.filter(function(x) { return x.card.uniqueId !== leadCard.uniqueId && (x.card.cardNo || x.card.uniqueId) !== leadNo && x.tMult > 0; });
 
-                // =====================================================================
-                // 2パス反復DP評価関数：
-                // Pass 1（初期推定）で構築したデッキに実際に副将を割り当て、
-                // その副将実測バフ（adjBonusOverrideMap）をフィードバックして Pass 2 の DP を再実行！
-                // =====================================================================
                 function evaluateFullLeadPlan(adjBonusOverrideMap) {
                     var applyOverride = function(arr) {
                         if (!adjBonusOverrideMap) return arr;
@@ -1176,11 +1168,12 @@ window.LeadEngine = (function() {
                             });
                         }
                     });
+                    // 警護デッキに居る主将は role: 'guard' とし、一般武将副将には「警悟」スキル持ちのみ許可
                     hGuardPicked.forEach(function(p) {
                         if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && p.firstTMult > 0) {
                             var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
                             masterList.push({
-                                role: 'passive', card: p.card, isSameBaseAsAce: isHonkyoAttack,
+                                role: 'guard', card: p.card, isSameBaseAsAce: isHonkyoAttack,
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 baseCopyVal: p.firstTMult / kMult3,
                                 baseCopyGenVal: 0,
@@ -1192,7 +1185,7 @@ window.LeadEngine = (function() {
                         if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && p.firstTMult > 0) {
                             var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
                             masterList.push({
-                                role: 'passive', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
+                                role: 'guard', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 baseCopyVal: p.firstTMult / kMult3,
                                 baseCopyGenVal: 0,
