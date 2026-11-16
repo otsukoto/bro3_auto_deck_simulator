@@ -1,6 +1,6 @@
 // ========================================================
-// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 1.02)
-// 役割：単騎エース・内政・パッシブ・警護デッキ最適化、7兵科別比較、重複ゼロ保証副将プール＆SL2枚ペア最適化
+// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 2.00)
+// 役割：単騎攻撃・破壊10枠最適化、サポート副将のパッシブ限定＆別拠点の拠点縛り副将除外、主将コピー・覚醒倍率計算
 // ========================================================
 window.SoloEngine = (function() {
     var isBuff10 = false;
@@ -37,6 +37,86 @@ window.SoloEngine = (function() {
                desc.indexOf('デュエル専用') !== -1 || desc.indexOf('デュエルでのみ') !== -1;
     }
 
+    function getSelfMirrorCopyRatio(skill) {
+        if (!skill || typeof skill !== 'object') return 1.0;
+        var sName = String(skill.name || '').trim();
+        var mLv = sName.match(/(?:LV|Lv|lv|ＬＶ)\s*([0-9]+)/);
+        if (mLv) {
+            var lv = parseInt(mLv[1], 10);
+            if (!isNaN(lv) && lv > 0) {
+                return Math.min(1.0, lv * 0.1);
+            }
+        }
+        return SharedDB.getMasterMirrorCopyRate(skill);
+    }
+
+    function isMasterFirstSkillMirror(sName, sDesc, firstDesc, isFromAdjutant, isHa) {
+        if (isFromAdjutant) return false;
+        if (sName.indexOf("副将の") !== -1) return false;
+
+        var isVarPrefix = (sName.indexOf("変:") === 0) || (isHa && sName.indexOf("副変:") === 0);
+        var hasMirrorKeyword = (
+            sName.indexOf("主将の") !== -1 ||
+            sName.indexOf("明鏡") !== -1 ||
+            sName.indexOf("明鑑") !== -1 ||
+            sName.indexOf("王春の") !== -1 ||
+            sDesc.indexOf("1つ目のスキル") !== -1 ||
+            sDesc.indexOf("１つ目のスキル") !== -1 ||
+            sDesc.indexOf("最初のスキル") !== -1 ||
+            sDesc.indexOf("第1スキル") !== -1
+        );
+        if (hasMirrorKeyword) return true;
+
+        if (isVarPrefix && firstDesc && sDesc) {
+            var norm1 = firstDesc.replace(/[\s ,，、。]/g, '');
+            var norm2 = sDesc.replace(/[\s ,，、。]/g, '');
+            if (norm1 === norm2) return true;
+            var skel1 = norm1.replace(/[0-9\.]+/g, '#');
+            var skel2 = norm2.replace(/[0-9\.]+/g, '#');
+            if (skel1.length >= 10 && skel1 === skel2) return true;
+        }
+        return false;
+    }
+
+    function calcWeatherMultSafe(rawDesc, weatherObj, targetStat) {
+        var cleaned = String(rawDesc || '').replace(/[（\(][^）\)]*?[）\)]/g, ' ');
+        var clauses = cleaned.split(/[。\n\r]+|(?=\s*(?:晴天候|曇|雨|雪|荒天|コスト|兵数|距離|武将|全武将|全兵))/);
+        var isSun = (weatherObj === 'SUN');
+        var isBad = (weatherObj === 'CLOUD' || weatherObj === 'RAIN' || weatherObj === 'SNOW');
+        var bestMult = 1.0;
+
+        for (var i = 0; i < clauses.length; i++) {
+            var c = clauses[i].trim();
+            if (!c) continue;
+
+            var matchedWeather = false;
+            if (isSun && /晴天候時/.test(c)) matchedWeather = true;
+            if (isBad && /(?:荒天時|曇[、・\s]*雨[、・\s]*雪天候時|雨天候時|曇天候時|雪天候時)/.test(c)) matchedWeather = true;
+            if (!matchedWeather) continue;
+
+            if (/[0-9\.]+[%％]/.test(c)) continue;
+
+            var hasTarget = (c.indexOf(targetStat) !== -1) || (c.indexOf('効果') !== -1) || (c.indexOf('威力') !== -1);
+            var hasOtherStat = /(?:移動速度|移速|討伐ゲージ|経験値|資源|知力)/.test(c) ||
+                               (targetStat === '攻撃' && c.indexOf('防御') !== -1 && c.indexOf('攻撃') === -1) ||
+                               (targetStat === '防御' && c.indexOf('攻撃') !== -1 && c.indexOf('防御') === -1);
+            if (hasOtherStat && !hasTarget) continue;
+
+            var reSpecific = new RegExp('(?:効果|威力|' + targetStat + '(?:力)?)[がはのを]?\\s*([0-9\\.]+)\\s*倍');
+            var mMult = c.match(reSpecific);
+            if (!mMult && hasTarget) {
+                mMult = c.match(/(?:晴天候時|荒天時|曇[、・\s]*雨[、・\s]*雪天候時|雨天候時|曇天候時|雪天候時)[はの時に]?\s*([0-9\.]+)\s*倍/);
+            }
+            if (mMult) {
+                var val = parseFloat(mMult[1]);
+                if (!isNaN(val) && val > 1.0) {
+                    bestMult = Math.max(bestMult, val);
+                }
+            }
+        }
+        return bestMult;
+    }
+
     function syncSoldierFilterButtons(activeKey) {
         for (var i = 0; i < SOLDIER_ORDER.length; i++) {
             var btn = document.getElementById('btnSoloSoldier_' + SOLDIER_ORDER[i]);
@@ -48,13 +128,16 @@ window.SoloEngine = (function() {
             }
         }
         var lbl = document.getElementById('labelSoloSoldierStatus');
-        if (lbl && SOLDIER_META[activeKey]) {
-            lbl.textContent = SOLDIER_META[activeKey].label;
-        }
+        if (lbl && SOLDIER_META[activeKey]) lbl.textContent = SOLDIER_META[activeKey].label;
     }
 
     function parseSkill(skill, weatherObj) {
-        var empty = { gMult: 0, leadBuff: 0, rawAdd: 0, isGekirei: false, isPassive: false, isGuard: false, mustBeSameBase: false, isShurei: false, isLead: false, isSupport: false };
+        var empty = {
+            gMult: 0, leadBuff: 0, rawAdd: 0,
+            isGekirei: false, isPassive: false, isGuard: false,
+            mustBeSameBase: false, isShurei: false,
+            isLead: false, isSupport: false, isDefPrefix: false, isNaiseiActive: false
+        };
         if (!skill || typeof skill !== 'object') return empty;
         var name = String(skill.name || "").trim();
         var rawDesc = String(skill.description || "").trim();
@@ -69,53 +152,70 @@ window.SoloEngine = (function() {
         var normDesc = (normRawDesc + " " + name).trim();
 
         var isAttackSkill = (name.indexOf("攻:") === 0 || name.indexOf("副攻:") === 0 || name.indexOf("攻防:") === 0 || name.indexOf("副攻防:") === 0);
-        var isDefenseSkill = (name.indexOf("防:") === 0 || name.indexOf("副防:") === 0);
+        res.isDefPrefix = (name.indexOf("防:") === 0);
+        var isVarPrefix = (name.indexOf("変:") === 0 || name.indexOf("副変:") === 0);
 
-        if (normDesc.indexOf("自動で発動") !== -1 || normDesc.indexOf("自動発動") !== -1 || normDesc.indexOf("全滅時も発動") !== -1 || normDesc.indexOf("パッシブ") !== -1) res.isPassive = true;
-        if (normDesc.indexOf("警護デッキ") !== -1 || name.indexOf("警悟") !== -1 || normDesc.indexOf("警悟") !== -1) { res.isGuard = true; res.isPassive = true; }
-        if (name.indexOf("檄令") !== -1 || normDesc.indexOf("主将の攻撃力が増加") !== -1 || normDesc.indexOf("全武将の攻撃力が増加") !== -1) { res.isGekirei = true; res.isPassive = true; res.isSupport = true; }
+        var hasExplicitManual = /(?:スキル使用中|スキル発動時|発動すると|一定時間|勅令|襲令|斗魂令|号令|戦陣|極意)/.test(normDesc) &&
+                                normDesc.indexOf("自動で発動") === -1 && normDesc.indexOf("自動発動") === -1;
+
+        if (!hasExplicitManual && (
+            normDesc.indexOf("自動で発動") !== -1 ||
+            normDesc.indexOf("自動発動") !== -1 ||
+            normDesc.indexOf("全滅時も発動") !== -1 ||
+            normDesc.indexOf("パッシブ") !== -1 ||
+            normDesc.indexOf("常に発動") !== -1 ||
+            normDesc.indexOf("常時発動") !== -1 ||
+            normDesc.indexOf("デッキにセット") !== -1 ||
+            /(?:王威令|覇王令)/.test(name)
+        )) {
+            res.isPassive = true;
+        }
+        if (normDesc.indexOf("警護デッキ") !== -1 || name.indexOf("警悟") !== -1 || normDesc.indexOf("警悟") !== -1) {
+            res.isGuard = true;
+            res.isPassive = true;
+        }
+        if (name.indexOf("檄令") !== -1 || normDesc.indexOf("主将の攻撃力が増加") !== -1 || normDesc.indexOf("全武将の攻撃力が増加") !== -1) {
+            res.isGekirei = true;
+            res.isPassive = true;
+            res.isSupport = true;
+        }
 
         var isSelfOnly = isAttackSkill || (
             /(?:進攻|突撃|強襲|遼来撃|猛撃|豪撃|極撃|天撃|神撃|帝撃|龍撃|覇撃|烈撃|雷光|神速|飛将|闘将|騎将|槍将|弓将|攻城|破砕|衝車|劫略|撃破|一騎当千|覇道|滅亡|武神|闘神|軍神)/.test(name) ||
             /(?:自身の攻撃力|この武将の攻撃力|全滅時も発動|討伐ゲージ|持ち帰る資源)/.test(normDesc)
         );
 
-        var isTrueSupportAura = !isAttackSkill && (
-            /(?:自拠点|セットした拠点|この武将をセットした拠点).*?(?:出兵|出撃|戦闘時).*?(?:全武将|全兵士|全ての武将|すべての武将|全ての兵士|すべての兵士|全軍)/.test(normDesc) ||
-            /(?:全拠点|すべての拠点|全ての拠点|全軍).*?(?:出兵|出撃|戦闘時)?.*?(?:全武将|全ての武将|すべての武将|全軍).*?(?:自動で発動|自動発動|パッシブ)/.test(normDesc) ||
-            /(?:自拠点|セットした拠点).*?(?:全武将|すべての武将|全ての武将|全兵士|すべての兵士|全ての兵士|全軍).*?攻撃/.test(normDesc) ||
+        var affectsGenerals = /(?:全武将|全ての武将|すべての武将|武将|全軍)/.test(normRawDesc) && normRawDesc.indexOf("武将を除く") === -1;
+        var isTrueSupportAura = !isAttackSkill && !isSelfOnly && (
+            affectsGenerals ||
             /(?:勅令|襲令|斗魂令)/.test(name)
-        ) && !isSelfOnly;
+        );
 
         var isGlobalAura = /(?:全拠点|全ての拠点|すべての拠点|自拠点.*?(?:出兵|出撃))/.test(normDesc);
-        if (!isGlobalAura || normDesc.indexOf("セットした拠点") !== -1 || normDesc.indexOf("この武将をセットした拠点") !== -1) res.mustBeSameBase = true;
+        if (!isGlobalAura || normDesc.indexOf("セットした拠点") !== -1 || normDesc.indexOf("この武将をセットした拠点") !== -1 || normDesc.indexOf("所属拠点が同一") !== -1) {
+            res.mustBeSameBase = true;
+        }
 
-        var wMult = 1.0;
-        var mSun = normDesc.match(/晴天候時(?:は|の時)?.*?([0-9\.]+)倍/);
-        if (mSun && weatherObj === 'SUN') wMult = Math.max(wMult, parseFloat(mSun[1]));
-        var mBad = normDesc.match(/(?:荒天時|曇[、・\s]*雨[、・\s]*雪天候時)(?:は|の時)?.*?([0-9\.]+)倍/);
-        if (mBad && ['CLOUD', 'RAIN', 'SNOW'].indexOf(weatherObj) !== -1) wMult = Math.max(wMult, parseFloat(mBad[1]));
+        var wMult = calcWeatherMultSafe(normRawDesc, weatherObj, '攻撃');
 
         var val = 0;
-        var m1 = normRawDesc.match(/(?:全武将|[^\s、。・]*?科武将|武将|自身).*?攻撃(?:力)?[がをのは]?([0-9\.]+)[%％]/);
+        var m1 = normRawDesc.match(/(?:全武将|[^\s、。・]*?科武将|武将|自身|全軍|全拠点)[^\n。]*?攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速|知力|討伐ゲージ))*\s*[がをのは]?\s*([0-9\.]+)[%％]/);
         if (m1) {
             val = parseFloat(m1[1]);
         } else {
-            var m2 = normRawDesc.match(/(?:兵士|軍|兵科|全兵)[、，・,\/\s]+(?:[^\s、。]+科)?武将.*?攻撃(?:力)?[がをのは]?([0-9\.]+)[%％]/);
+            var m2 = normRawDesc.match(/(?:兵士|軍|兵科|全兵)[、，・,\/\s]+(?:[^\s、。]+科)?武将[^\n。]*?攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速))*\s*[がをのは]?\s*([0-9\.]+)[%％]/);
             if (m2) {
                 val = parseFloat(m2[1]);
             } else {
-                var m3 = normRawDesc.match(/(?:全軍|全拠点).*?攻撃(?:力)?[がをのは]?([0-9\.]+)[%％]/);
-                if (m3 && normRawDesc.indexOf("兵を除く") === -1) {
-                    val = parseFloat(m3[1]);
-                } else if (isAttackSkill) {
-                    var m4 = normRawDesc.match(/攻撃(?:力)?[がをのは]?([0-9\.]+)[%％]/);
-                    if (m4) val = parseFloat(m4[1]);
+                var isTroopOnlyText = /(?:兵士|槍兵|弓兵|騎兵|剣兵|斧兵|双兵|錘兵)の攻撃/.test(normRawDesc) || normRawDesc.indexOf("武将を除く") !== -1;
+                if (!isTroopOnlyText || isAttackSkill) {
+                    var m3 = normRawDesc.match(/攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速))*\s*[がをのは]?\s*([0-9\.]+)[%％]/);
+                    if (m3) val = parseFloat(m3[1]);
                 }
             }
         }
 
-        var mExtra = normRawDesc.match(/更に.*?攻撃(?:力)?[がをのは]?([0-9\.]+)[%％]/);
+        var mExtra = normRawDesc.match(/更に(?:攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速))*\s*[がをのは]?)?\s*([0-9\.]+)[%％]/);
         if (mExtra) {
             var extraV = parseFloat(mExtra[1]);
             if (normRawDesc.indexOf("晴天候") !== -1) {
@@ -129,18 +229,39 @@ window.SoloEngine = (function() {
 
         var effectiveVal = val * wMult;
 
-        if (isSelfOnly) { res.isLead = true; res.leadBuff = effectiveVal; res.gMult = 0; res.isSupport = false; }
-        else if (isTrueSupportAura || res.isGekirei) {
-            res.isSupport = true; res.gMult = effectiveVal; res.leadBuff = effectiveVal;
-            if (isDefenseSkill && !res.isPassive && (normDesc.indexOf("セットした拠点") !== -1 || normDesc.indexOf("この武将をセットした拠点") !== -1)) res.isShurei = true;
-        } else if (name.indexOf("変:") === 0 || name.indexOf("副変:") === 0) {
-            res.isSupport = true; res.gMult = effectiveVal; res.leadBuff = effectiveVal;
-        } else { res.isLead = true; res.leadBuff = effectiveVal; res.gMult = 0; res.isSupport = false; }
+        if (isSelfOnly) {
+            res.isLead = true;
+            res.leadBuff = effectiveVal;
+            res.gMult = 0;
+            res.isSupport = false;
+        } else if (isTrueSupportAura || res.isGekirei) {
+            res.isSupport = true;
+            res.gMult = effectiveVal;
+            res.leadBuff = effectiveVal;
+            if ((res.isDefPrefix || isVarPrefix) && !res.isPassive) {
+                res.isNaiseiActive = true;
+                if (normDesc.indexOf("セットした拠点") !== -1 || normDesc.indexOf("この武将をセットした拠点") !== -1) {
+                    res.isShurei = true;
+                }
+            }
+        } else if (isVarPrefix) {
+            res.isSupport = true;
+            res.gMult = effectiveVal;
+            res.leadBuff = effectiveVal;
+            if (!res.isPassive) {
+                res.isNaiseiActive = true;
+            }
+        } else {
+            res.isLead = true;
+            res.leadBuff = effectiveVal;
+            res.gMult = 0;
+            res.isSupport = false;
+        }
 
         return res;
     }
 
-    function buildSoloGeneralAdjutantCand(gCard, masterRole, weatherObj) {
+    function buildSoloGeneralAdjutantCand(gCard, masterRole, weatherObj, isSameBaseAsAce) {
         if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
         var skills = gCard.skills || [];
         if (skills.length === 0 || !skills[0]) return null;
@@ -152,10 +273,11 @@ window.SoloEngine = (function() {
         var gk0 = SharedDB.getGekireiBonus(s0, gCard.rarity, 4.5);
         var gkAdd = (gk0 && gk0.bonus) || 0;
 
-        // 内政官・サポート(masterRole !== 'lead')には「攻:」第1スキル（単騎専用）を絶対につけない
-        if (masterRole !== 'lead' && (p0.isLead && !p0.isSupport)) {
-            return null;
-        }
+        // サポート武将(masterRole !== 'lead')にはパッシブ(p0.isPassive)を持つ一般武将のみ副将配置可能
+        if (masterRole !== 'lead' && (!p0.isSupport || !p0.isPassive)) return null;
+
+        // 拠点縛りスキルを持つ副将は、エースと同じ拠点に配置された主将にしか付けられない
+        if (!isSameBaseAsAce && p0.mustBeSameBase) return null;
 
         var gVal = (masterRole === 'lead') ? SharedDB.safeNum(p0.leadBuff, 0) : SharedDB.safeNum(p0.gMult, 0);
         if (gVal <= 0 && gkAdd <= 0) return null;
@@ -166,22 +288,27 @@ window.SoloEngine = (function() {
             : ('[副]' + cleanSName + ' 将+' + SharedDB.formatBuffNum(gVal) + '%');
 
         return {
-            card: gCard,
-            uniqueId: gCard.uniqueId,
-            cardNo: gCard.cardNo,
-            genGMult: gVal,
-            genRaw: gkAdd,
-            label: badge,
+            card: gCard, uniqueId: gCard.uniqueId, cardNo: gCard.cardNo,
+            genGMult: gVal, genRaw: gkAdd, label: badge,
             genStats: { soloG: gVal, soloGk: gkAdd }
         };
     }
 
     function evaluateCard(card, weatherObj, mode, masterCost) {
+        var emptySupport = {
+            gMult: 0, rawAdd: 0, firstRawAdd: 0, firstGMult: 0,
+            naiseiGMult: 0, naiseiRawAdd: 0, naiseiFirstGMult: 0, naiseiMarginalGain: 0,
+            canBePassiveSlot: false, canBeGuardSlot: false, canBeNaiseiSlot: false,
+            passiveMustBeSameBase: false, naiseiMustBeSameBase: false,
+            isShurei: false, isGekirei: false, series: null
+        };
         var skills = (card && card.skills) || [];
-        if (skills.length === 0) return { gMult: 0, rawAdd: 0, firstRawAdd: 0, firstGMult: 0, isPassive: false, isGuard: false, isActive: false, mustBeSameBase: false, isShurei: false, isGekirei: false, series: null };
+        if (skills.length === 0) return emptySupport;
 
         var isHa = SharedDB.isHaBusho(card);
+        var kMultSelf = SharedDB.getKakuseiMultiplier(card);
         var firstSkill = skills[0];
+        var firstDesc = String((firstSkill && firstSkill.description) || '').trim();
         var firstGk = (!isDuelSkill(firstSkill)) ? SharedDB.getGekireiBonus(firstSkill, card.rarity, masterCost) : { bonus: 0, series: null };
         var isGekirei = (firstGk && firstGk.bonus > 0);
         var baseGkBonus = isGekirei ? firstGk.bonus : 0;
@@ -190,20 +317,85 @@ window.SoloEngine = (function() {
         var p0 = parseSkill(firstSkill, weatherObj);
         var firstVal = (mode === 'lead') ? (p0.leadBuff || 0) : (p0.gMult || 0);
 
-        var passiveRawAdd = baseGkBonus;
-        var passiveBuffSum = 0;
-        var activeCandidates = [];
-        var hasPassive = p0.isPassive;
-        var isGuardCard = p0.isGuard;
-        var mustBeSameBase = p0.mustBeSameBase;
-
-        if (!isGekirei && firstVal > 0) {
-            if (p0.isPassive) {
-                passiveBuffSum += firstVal;
-                hasPassive = true;
-            } else {
-                activeCandidates.push({ val: firstVal, isShurei: p0.isShurei, mustBeSameBase: p0.mustBeSameBase });
+        if (mode === 'lead') {
+            var leadPassiveRaw = baseGkBonus;
+            var leadPassiveBuff = 0;
+            var leadActiveCands = [];
+            if (!isGekirei && firstVal > 0) {
+                if (p0.isPassive) leadPassiveBuff += firstVal;
+                else leadActiveCands.push(firstVal);
             }
+            for (var li = 1; li < skills.length; li++) {
+                var ls = skills[li];
+                if (!ls) continue;
+                var lName = String(ls.name || '').trim();
+                var lDesc = String(ls.description || '').trim();
+                if (lName.indexOf("覚:") === 0 || lName.indexOf("副覚:") === 0 || lName.indexOf("覚醒") !== -1) continue;
+                if (isDuelSkill(ls)) continue;
+                var lFromAdj = (lName.indexOf("副:") === 0 || lName.indexOf("副変:") === 0 || lName.indexOf("副攻:") === 0 || lName.indexOf("副防:") === 0 || lName.indexOf("副ﾃﾞｭｴﾙ:") === 0);
+                if (!isHa && lFromAdj) continue;
+
+                var lSelfMir = isMasterFirstSkillMirror(lName, lDesc, firstDesc, lFromAdj, isHa);
+                if (lSelfMir) {
+                    var lpi = parseSkill(ls, weatherObj);
+                    var lWritten = lpi.leadBuff || 0;
+                    if (lWritten > 0) {
+                        leadPassiveBuff += lWritten;
+                    } else {
+                        var lRate = getSelfMirrorCopyRatio(ls);
+                        if (isGekirei && baseGkBonus > 0) {
+                            leadPassiveRaw += Math.floor((baseGkBonus / kMultSelf) * lRate);
+                        } else if (firstVal > 0) {
+                            leadPassiveBuff += (firstVal / kMultSelf) * lRate;
+                        }
+                    }
+                    continue;
+                }
+                if (lName.indexOf("檄令") !== -1 || lDesc.indexOf("主将の攻撃力が増加") !== -1) {
+                    var lgk = SharedDB.getGekireiBonus(ls, card.rarity, masterCost);
+                    leadPassiveRaw += (lgk && lgk.bonus) || 0;
+                } else {
+                    var lpi2 = parseSkill(ls, weatherObj);
+                    var lBuff = lpi2.leadBuff || 0;
+                    if (lBuff > 0) {
+                        if (lpi2.isPassive || lFromAdj) leadPassiveBuff += lBuff;
+                        else leadActiveCands.push(lBuff);
+                    }
+                }
+            }
+            var leadActiveSum = 0;
+            if (leadActiveCands.length > 0) {
+                if (isHa) {
+                    for (var lai = 0; lai < leadActiveCands.length; lai++) leadActiveSum += leadActiveCands[lai];
+                } else {
+                    leadActiveCands.sort(function(a, b) { return b - a; });
+                    leadActiveSum = leadActiveCands[0];
+                }
+            }
+            return {
+                gMult: leadPassiveBuff + leadActiveSum,
+                rawAdd: leadPassiveRaw,
+                firstRawAdd: baseGkBonus,
+                firstGMult: firstVal
+            };
+        }
+
+        // サポート（mode === 'support'）評価
+        var passiveOnlyRaw = baseGkBonus;
+        var passiveOnlyBuff = 0;
+        var naiseiMirrorBuff = 0;
+        var naiseiActiveCands = [];
+        var isGuardCard = p0.isGuard;
+        var passiveMustBeSameBase = false;
+
+        var firstIsPassiveSupport = isGekirei || (p0.isSupport && p0.isPassive && firstVal > 0);
+        var firstIsNaiseiActive = (!isGekirei && p0.isNaiseiActive && firstVal > 0);
+
+        if (firstIsPassiveSupport) {
+            if (!isGekirei) passiveOnlyBuff += firstVal;
+            if (p0.mustBeSameBase) passiveMustBeSameBase = true;
+        } else if (firstIsNaiseiActive) {
+            naiseiActiveCands.push({ val: firstVal, isShurei: p0.isShurei, mustBeSameBase: p0.mustBeSameBase });
         }
 
         for (var i = 1; i < skills.length; i++) {
@@ -218,77 +410,88 @@ window.SoloEngine = (function() {
             var isFromAdjutant = (sName.indexOf("副:") === 0 || sName.indexOf("副変:") === 0 || sName.indexOf("副攻:") === 0 || sName.indexOf("副防:") === 0 || sName.indexOf("副ﾃﾞｭｴﾙ:") === 0);
             if (!isHa && isFromAdjutant) continue;
 
-            var isShujoMirror = !isFromAdjutant && (
-                sName.indexOf("主将の") !== -1 ||
-                sName.indexOf("明鑑") !== -1 ||
-                sName.indexOf("王春の") !== -1 ||
-                (sName.indexOf("明鏡") !== -1 && sName.indexOf("副将の") === -1) ||
-                sName.indexOf("変:") === 0 ||
-                (isHa && sName.indexOf("副変:") === 0)
-            );
+            var pi = parseSkill(s, weatherObj);
+            var isShujoMirror = isMasterFirstSkillMirror(sName, sDesc, firstDesc, isFromAdjutant, isHa);
 
             if (isShujoMirror) {
-                var pi = parseSkill(s, weatherObj);
-                var writtenVal = (mode === 'lead') ? (pi.leadBuff || 0) : (pi.gMult || 0);
+                var writtenVal = pi.gMult || 0;
                 if (writtenVal > 0) {
-                    passiveBuffSum += writtenVal;
+                    if (firstIsPassiveSupport) {
+                        passiveOnlyBuff += writtenVal;
+                        if (p0.mustBeSameBase) passiveMustBeSameBase = true;
+                    } else if (firstIsNaiseiActive) {
+                        naiseiMirrorBuff += writtenVal;
+                    }
                 } else {
-                    var copyRateRatio = SharedDB.getMasterMirrorCopyRate(s);
-                    if (isGekirei && baseGkBonus > 0) passiveRawAdd += Math.floor(baseGkBonus * copyRateRatio);
-                    else if (firstVal > 0) passiveBuffSum += firstVal * copyRateRatio;
+                    var copyRateRatio = getSelfMirrorCopyRatio(s);
+                    if (firstIsPassiveSupport) {
+                        if (isGekirei && baseGkBonus > 0) passiveOnlyRaw += Math.floor((baseGkBonus / kMultSelf) * copyRateRatio);
+                        else if (firstVal > 0) passiveOnlyBuff += (firstVal / kMultSelf) * copyRateRatio;
+                    } else if (firstIsNaiseiActive && firstVal > 0) {
+                        naiseiMirrorBuff += (firstVal / kMultSelf) * copyRateRatio;
+                    }
                 }
-                hasPassive = true;
                 continue;
             }
 
             if (sName.indexOf("檄令") !== -1 || sDesc.indexOf("主将の攻撃力が増加") !== -1) {
                 var gk_i = SharedDB.getGekireiBonus(s, card.rarity, masterCost);
-                passiveRawAdd += (gk_i && gk_i.bonus) || 0;
-                hasPassive = true;
+                passiveOnlyRaw += (gk_i && gk_i.bonus) || 0;
             } else {
-                var pi2 = parseSkill(s, weatherObj);
-                var sBuff = (mode === 'lead') ? (pi2.leadBuff || 0) : (pi2.gMult || 0);
-                if (sBuff > 0) {
-                    if (pi2.isPassive || isFromAdjutant) {
-                        passiveBuffSum += sBuff;
-                        hasPassive = true;
-                    } else {
-                        activeCandidates.push({ val: sBuff, isShurei: pi2.isShurei, mustBeSameBase: pi2.mustBeSameBase });
+                var sBuff = pi.gMult || 0;
+                if (sBuff > 0 && pi.isSupport) {
+                    if (pi.isPassive) {
+                        passiveOnlyBuff += sBuff;
+                        if (pi.mustBeSameBase) passiveMustBeSameBase = true;
+                        if (pi.isGuard) isGuardCard = true;
+                    } else if (isFromAdjutant && (sName.indexOf("副変:") === 0)) {
+                        if (firstIsNaiseiActive) naiseiMirrorBuff += sBuff;
+                    } else if (!isFromAdjutant && pi.isNaiseiActive) {
+                        naiseiActiveCands.push({ val: sBuff, isShurei: pi.isShurei, mustBeSameBase: pi.mustBeSameBase });
                     }
-                    if (pi2.isGuard) isGuardCard = true;
                 }
             }
         }
 
-        var activeBuffSum = 0;
-        var hasActive = false;
+        var naiseiActiveBuff = 0;
+        var hasNaiseiActive = false;
         var isShureiCard = false;
+        var naiseiMustBeSameBase = passiveMustBeSameBase;
 
-        if (activeCandidates.length > 0) {
-            hasActive = true;
+        if (naiseiActiveCands.length > 0) {
+            hasNaiseiActive = true;
             if (isHa) {
-                for (var ai = 0; ai < activeCandidates.length; ai++) {
-                    activeBuffSum += activeCandidates[ai].val;
-                    if (activeCandidates[ai].isShurei) isShureiCard = true;
-                    if (activeCandidates[ai].mustBeSameBase) mustBeSameBase = true;
+                for (var ai = 0; ai < naiseiActiveCands.length; ai++) {
+                    naiseiActiveBuff += naiseiActiveCands[ai].val;
+                    if (naiseiActiveCands[ai].isShurei) isShureiCard = true;
+                    if (naiseiActiveCands[ai].mustBeSameBase) naiseiMustBeSameBase = true;
                 }
             } else {
-                activeCandidates.sort(function(a, b) { return b.val - a.val; });
-                activeBuffSum = activeCandidates[0].val;
-                isShureiCard = Boolean(activeCandidates[0].isShurei);
-                if (activeCandidates[0].mustBeSameBase) mustBeSameBase = true;
+                naiseiActiveCands.sort(function(a, b) { return b.val - a.val; });
+                naiseiActiveBuff = naiseiActiveCands[0].val;
+                isShureiCard = Boolean(naiseiActiveCands[0].isShurei);
+                if (naiseiActiveCands[0].mustBeSameBase) naiseiMustBeSameBase = true;
             }
         }
+
+        var hasPassiveEffect = (passiveOnlyBuff > 0 || passiveOnlyRaw > 0);
+        var naiseiTotalBuff = passiveOnlyBuff + naiseiMirrorBuff + naiseiActiveBuff;
+        var naiseiMarginalGain = naiseiMirrorBuff + naiseiActiveBuff;
 
         return {
-            gMult: passiveBuffSum + activeBuffSum,
-            rawAdd: passiveRawAdd,
-            firstRawAdd: baseGkBonus,
-            firstGMult: firstVal,
-            isPassive: !hasActive && hasPassive,
-            isActive: hasActive,
-            isGuard: isGuardCard,
-            mustBeSameBase: mustBeSameBase,
+            gMult: passiveOnlyBuff,
+            rawAdd: passiveOnlyRaw,
+            firstRawAdd: isGekirei ? baseGkBonus : 0,
+            firstGMult: (firstIsPassiveSupport && !isGekirei) ? firstVal : 0,
+            naiseiGMult: naiseiTotalBuff,
+            naiseiRawAdd: passiveOnlyRaw,
+            naiseiFirstGMult: (firstIsPassiveSupport || firstIsNaiseiActive) ? firstVal : 0,
+            naiseiMarginalGain: naiseiMarginalGain,
+            canBePassiveSlot: !isGuardCard && hasPassiveEffect,
+            canBeGuardSlot: isGuardCard && hasPassiveEffect,
+            canBeNaiseiSlot: hasNaiseiActive,
+            passiveMustBeSameBase: passiveMustBeSameBase,
+            naiseiMustBeSameBase: naiseiMustBeSameBase,
             isShurei: isShureiCard,
             isGekirei: isGekirei,
             series: seriesName
@@ -297,24 +500,42 @@ window.SoloEngine = (function() {
 
     function getBestWeatherForCard(card, masterCost) {
         var weathers = ['SUN', 'CLOUD', 'RAIN', 'SNOW'];
-        var bestW = 'SUN';
-        var maxEval = { gMult: 0, rawAdd: 0, firstRawAdd: 0, firstGMult: 0, isActive: false, isPassive: false, isGuard: false, mustBeSameBase: false, isShurei: false, isGekirei: false, series: null };
+        var bestPassiveW = 'SUN';
+        var bestNaiseiW = 'SUN';
+        var maxPassiveEval = null;
+        var maxNaiseiEval = null;
+        var bestPassiveScore = -1;
+        var bestNaiseiScore = -1;
+
         for (var i = 0; i < weathers.length; i++) {
             var w = weathers[i];
             var ev = evaluateCard(card, w, 'support', masterCost);
-            if ((ev.gMult || 0) > (maxEval.gMult || 0) || ((ev.gMult || 0) === (maxEval.gMult || 0) && (ev.rawAdd || 0) > (maxEval.rawAdd || 0))) {
-                maxEval = ev; bestW = w;
+            var pScore = (ev.gMult || 0) * 100 + (ev.rawAdd || 0);
+            if (pScore > bestPassiveScore) {
+                bestPassiveScore = pScore;
+                maxPassiveEval = ev;
+                bestPassiveW = w;
+            }
+            var nScore = (ev.naiseiGMult || 0) * 100 + (ev.naiseiRawAdd || 0);
+            if (nScore > bestNaiseiScore) {
+                bestNaiseiScore = nScore;
+                maxNaiseiEval = ev;
+                bestNaiseiW = w;
             }
         }
-        return { bestWeather: bestW, eval: maxEval };
+        return {
+            bestWeather: bestNaiseiW,
+            bestPassiveWeather: bestPassiveW,
+            eval: maxPassiveEval || evaluateCard(card, 'SUN', 'support', masterCost),
+            naiseiEval: maxNaiseiEval || evaluateCard(card, 'SUN', 'support', masterCost)
+        };
     }
 
     function estimateLeadWithOptimalAdjutants(card, leadGMult, firstGMult, allMirrorPool, usedTeisenIds, estSupportMult, estGekirei) {
         var baseAtk = SharedDB.safeNum(card.baseAttack, 1000);
         if (SharedDB.isHaBusho(card) || SharedDB.safeNum(card.maxFukushoCost, 0) <= 0) {
             return {
-                adjAtkBonus: 0,
-                adjBuffBonus: 0,
+                adjAtkBonus: 0, adjBuffBonus: 0,
                 estTotalAtk: baseAtk + estGekirei,
                 estTotalMult: estSupportMult + leadGMult,
                 estScore: (baseAtk + estGekirei) * (1 + (estSupportMult + leadGMult) / 100)
@@ -340,10 +561,8 @@ window.SoloEngine = (function() {
             var curTotAtk = baseAtk + curAtkAdd + estGekirei;
             var curTotMult = estSupportMult + leadGMult + curBuffAdd;
             return {
-                adjAtkBonus: curAtkAdd,
-                adjBuffBonus: curBuffAdd,
-                estTotalAtk: curTotAtk,
-                estTotalMult: curTotMult,
+                adjAtkBonus: curAtkAdd, adjBuffBonus: curBuffAdd,
+                estTotalAtk: curTotAtk, estTotalMult: curTotMult,
                 estScore: curTotAtk * (1 + curTotMult / 100)
             };
         }
@@ -387,8 +606,7 @@ window.SoloEngine = (function() {
         var bestComboScore = (baseAtk + bestComboAtk + estGekirei) * (1 + (estSupportMult + leadGMult + bestComboBuff) / 100);
 
         return {
-            adjAtkBonus: bestComboAtk,
-            adjBuffBonus: bestComboBuff,
+            adjAtkBonus: bestComboAtk, adjBuffBonus: bestComboBuff,
             estTotalAtk: baseAtk + bestComboAtk + estGekirei,
             estTotalMult: estSupportMult + leadGMult + bestComboBuff,
             estScore: bestComboScore
@@ -414,7 +632,6 @@ window.SoloEngine = (function() {
             var isReassignMode = (adjutantMode !== 'CURRENT');
             var validCards = uCards.filter(function(c) { return !c.isAdjutant && !AppCards.excludedCardIds.has(c.uniqueId); });
 
-            // 重複ゼロ保証の副将プール一元構築（帝仙鏡・水鏡等の二重カウント完全防止）
             var unifiedPools = SharedDB.buildUnifiedAdjutantPools(uCards, AppCards.excludedCardIds, isReassignMode);
             var allMirrorPool = unifiedPools.mirrorPool;
             var allGeneralPool = unifiedPools.generalPool;
@@ -436,12 +653,20 @@ window.SoloEngine = (function() {
                 var teisenFkCards = allMirrorPool.filter(function(m) { return m.info && m.info.type === 'senkyo'; });
                 var teisenCandidateList = validCards.filter(function(c) {
                     var origC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
-                    return !SharedDB.isHaBusho(c) && String(c.rarity || '').toUpperCase() === 'SL' && SharedDB.safeNum(c.maxFukushoCost, 0) > 0 && origC > 1.0;
+                    if (SharedDB.isHaBusho(c) || String(c.rarity || '').toUpperCase() !== 'SL' || SharedDB.safeNum(c.maxFukushoCost, 0) <= 0 || origC <= 1.0) {
+                        return false;
+                    }
+                    var evS = evaluateCard(c, 'SUN', 'support', 4.5);
+                    return evS.canBePassiveSlot || evS.canBeNaiseiSlot;
                 });
                 teisenCandidateList.sort(function(a, b) {
                     var origA = SharedDB.safeNum(a.originalCost !== undefined ? a.originalCost : a.cost, 4.5);
                     var origB = SharedDB.safeNum(b.originalCost !== undefined ? b.originalCost : b.cost, 4.5);
-                    return (origB - origA) || (evaluateCard(b, 'SUN', 'support', 4.5).gMult - evaluateCard(a, 'SUN', 'support', 4.5).gMult);
+                    var evA = evaluateCard(a, 'SUN', 'support', 4.5);
+                    var evB = evaluateCard(b, 'SUN', 'support', 4.5);
+                    var valA = Math.max(evA.gMult, evA.naiseiGMult);
+                    var valB = Math.max(evB.gMult, evB.naiseiGMult);
+                    return (origB - origA) || (valB - valA);
                 });
 
                 for (var ti = 0; ti < Math.min(teisenFkCards.length, teisenCandidateList.length); ti++) {
@@ -492,7 +717,7 @@ window.SoloEngine = (function() {
             var seenGkNos = new Set();
             validCards.forEach(function(c) {
                 var gkEv = evaluateCard(c, 'SUN', 'support', 4.5);
-                if (gkEv.isGekirei && gkEv.rawAdd > 0) {
+                if (gkEv.canBePassiveSlot && gkEv.isGekirei && gkEv.rawAdd > 0) {
                     var gNo = c.cardNo || c.uniqueId;
                     if (!seenGkNos.has(gNo)) {
                         seenGkNos.add(gNo);
@@ -524,9 +749,7 @@ window.SoloEngine = (function() {
             var topBySoldier = { HAMMER: null, DOUBLE: null, AXE: null, BOW: null, SPEAR: null, CAV: null, SWORD: null };
             for (var si = 0; si < allLeadPool.length; si++) {
                 var sk = allLeadPool[si].soldierKey;
-                if (topBySoldier.hasOwnProperty(sk) && !topBySoldier[sk]) {
-                    topBySoldier[sk] = allLeadPool[si];
-                }
+                if (topBySoldier.hasOwnProperty(sk) && !topBySoldier[sk]) topBySoldier[sk] = allLeadPool[si];
             }
 
             var isAutoDetectingBestSoldier = (!selectedSoldierFilter || !SOLDIER_META[selectedSoldierFilter]);
@@ -535,9 +758,7 @@ window.SoloEngine = (function() {
                 for (var oi = 0; oi < SOLDIER_ORDER.length; oi++) {
                     var sKey0 = SOLDIER_ORDER[oi];
                     var perSoldier = allLeadPool.filter(function(item) { return item.soldierKey === sKey0; });
-                    for (var pi = 0; pi < Math.min(2, perSoldier.length); pi++) {
-                        topSoloLeads.push(perSoldier[pi]);
-                    }
+                    for (var pi = 0; pi < Math.min(2, perSoldier.length); pi++) topSoloLeads.push(perSoldier[pi]);
                 }
             } else {
                 var filteredLeadPool = allLeadPool.filter(function(item) { return item.soldierKey === selectedSoldierFilter; });
@@ -559,33 +780,48 @@ window.SoloEngine = (function() {
                 validCards.forEach(function(c) {
                     if (c.uniqueId === leadCard.uniqueId || (c.cardNo || c.uniqueId) === leadNo || usedTeisenCardIds.has(c.uniqueId)) return;
                     var bestSup = getBestWeatherForCard(c, masterCost);
-                    var probe = bestSup.eval;
-                    if (!probe.isActive && !probe.isPassive && !probe.isGuard) return;
-                    if (SharedDB.safeNum(probe.gMult, 0) <= 0 && SharedDB.safeNum(probe.rawAdd, 0) <= 0) return;
-
+                    var pProbe = bestSup.eval;
+                    var nProbe = bestSup.naiseiEval;
                     var effCost = effectiveCostMap[c.uniqueId] || SharedDB.safeNum(c.cost, 1.0);
-                    var item = {
-                        card: c, effectiveCost: effCost,
-                        gMult: SharedDB.safeNum(probe.gMult, 0), rawAdd: SharedDB.safeNum(probe.rawAdd, 0),
-                        firstRawAdd: SharedDB.safeNum(probe.firstRawAdd, 0), firstGMult: SharedDB.safeNum(probe.firstGMult, 0),
-                        series: probe.series, isBound: probe.mustBeSameBase, isShurei: probe.isShurei, isGekirei: probe.isGekirei,
-                        weather: bestSup.bestWeather
-                    };
-                    if (probe.isGuard) guardPool.push(item);
-                    else if (probe.isPassive) {
-                        if (probe.mustBeSameBase) boundPassivePool.push(item);
-                        else globalPassivePool.push(item);
-                    } else if (probe.isActive) {
-                        var firstSName = String((c.skills && c.skills[0] && c.skills[0].name) || '');
-                        if (firstSName.indexOf("防:") === 0) {
-                            if (probe.isShurei) shureiPool.push(item);
-                            else allActivesPool.push(item);
-                        }
+
+                    if (pProbe && pProbe.canBeGuardSlot) {
+                        guardPool.push({
+                            card: c, effectiveCost: effCost,
+                            gMult: SharedDB.safeNum(pProbe.gMult, 0), rawAdd: SharedDB.safeNum(pProbe.rawAdd, 0),
+                            firstRawAdd: SharedDB.safeNum(pProbe.firstRawAdd, 0), firstGMult: SharedDB.safeNum(pProbe.firstGMult, 0),
+                            series: pProbe.series, isBound: pProbe.passiveMustBeSameBase, isShurei: false, isGekirei: pProbe.isGekirei,
+                            weather: bestSup.bestPassiveWeather
+                        });
+                    }
+
+                    if (pProbe && pProbe.canBePassiveSlot) {
+                        var pItem = {
+                            card: c, effectiveCost: effCost,
+                            gMult: SharedDB.safeNum(pProbe.gMult, 0), rawAdd: SharedDB.safeNum(pProbe.rawAdd, 0),
+                            firstRawAdd: SharedDB.safeNum(pProbe.firstRawAdd, 0), firstGMult: SharedDB.safeNum(pProbe.firstGMult, 0),
+                            series: pProbe.series, isBound: pProbe.passiveMustBeSameBase, isShurei: false, isGekirei: pProbe.isGekirei,
+                            weather: bestSup.bestPassiveWeather
+                        };
+                        if (pProbe.passiveMustBeSameBase) boundPassivePool.push(pItem);
+                        else globalPassivePool.push(pItem);
+                    }
+
+                    if (nProbe && nProbe.canBeNaiseiSlot) {
+                        var nItem = {
+                            card: c, effectiveCost: effCost,
+                            gMult: SharedDB.safeNum(nProbe.naiseiGMult, 0), rawAdd: SharedDB.safeNum(nProbe.naiseiRawAdd, 0),
+                            firstRawAdd: SharedDB.safeNum(nProbe.firstRawAdd, 0), firstGMult: SharedDB.safeNum(nProbe.naiseiFirstGMult, 0),
+                            marginalGain: SharedDB.safeNum(nProbe.naiseiMarginalGain, 0),
+                            series: nProbe.series, isBound: nProbe.naiseiMustBeSameBase, isShurei: nProbe.isShurei, isGekirei: nProbe.isGekirei,
+                            weather: bestSup.bestWeather
+                        };
+                        if (nProbe.isShurei) shureiPool.push(nItem);
+                        else allActivesPool.push(nItem);
                     }
                 });
 
                 var chosenShurei = null;
-                shureiPool.sort(function(a, b) { return b.gMult - a.gMult; });
+                shureiPool.sort(function(a, b) { return (b.marginalGain - a.marginalGain) || (b.gMult - a.gMult); });
                 if (shureiPool.length > 0) chosenShurei = shureiPool[0];
 
                 var shureiCost = chosenShurei ? chosenShurei.effectiveCost : 0.0;
@@ -594,7 +830,7 @@ window.SoloEngine = (function() {
                 if (originInitCost > originLimit) return;
 
                 var globalActives = allActivesPool.filter(function(a) { return !a.isBound; });
-                var topGlobals = globalActives.slice().sort(function(a, b) { return b.gMult - a.gMult; }).slice(0, 6);
+                var topGlobals = globalActives.slice().sort(function(a, b) { return (b.marginalGain - a.marginalGain) || (b.gMult - a.gMult); }).slice(0, 6);
 
                 var hSlotPatterns = [];
                 if (!isHonkyoAttack) {
@@ -608,7 +844,7 @@ window.SoloEngine = (function() {
                     for (var i = 0; i < topGlobals.length; i++) hSlotPatterns.push([topGlobals[i]]);
                     hSlotPatterns.push([]);
                 } else {
-                    var topH1 = allActivesPool.filter(function(a) { return !a.isShurei; }).sort(function(a, b) { return b.gMult - a.gMult; }).slice(0, 6);
+                    var topH1 = allActivesPool.filter(function(a) { return !a.isShurei; }).sort(function(a, b) { return (b.marginalGain - a.marginalGain) || (b.gMult - a.gMult); }).slice(0, 6);
                     for (var i = 0; i < topH1.length; i++) hSlotPatterns.push([topH1[i]]);
                     hSlotPatterns.push([]);
                 }
@@ -631,7 +867,7 @@ window.SoloEngine = (function() {
                         var aNo = a.card.cardNo || a.card.uniqueId;
                         return !usedNos.has(aNo) && !a.isShurei;
                     });
-                    remActivesForK.sort(function(a, b) { return b.gMult - a.gMult; });
+                    remActivesForK.sort(function(a, b) { return (b.marginalGain - a.marginalGain) || (b.gMult - a.gMult); });
 
                     for (var ai = 0; ai < remActivesForK.length; ai++) {
                         var act = remActivesForK[ai];
@@ -736,6 +972,27 @@ window.SoloEngine = (function() {
 
                 if (!bestLocalSetup) return;
 
+                if (!shouldAutoWeather) {
+                    var recalculatedSlots = {};
+                    var recalcActiveSum = 0;
+                    Object.keys(bestLocalSetup.activeSlots).forEach(function(sId) {
+                        var sItem = bestLocalSetup.activeSlots[sId];
+                        var slotW = AppCards.slotWeathers[sId] || sItem.weather || 'SUN';
+                        var reEv = evaluateCard(sItem.card, slotW, 'support', masterCost);
+                        var updatedItem = Object.assign({}, sItem, {
+                            gMult: SharedDB.safeNum(reEv.naiseiGMult, 0),
+                            rawAdd: SharedDB.safeNum(reEv.naiseiRawAdd, 0),
+                            firstGMult: SharedDB.safeNum(reEv.naiseiFirstGMult, 0),
+                            weather: slotW
+                        });
+                        recalculatedSlots[sId] = updatedItem;
+                        recalcActiveSum += updatedItem.gMult;
+                    });
+                    var pSumOnly = bestLocalSetup.basePassives.concat(bestLocalSetup.subPassives).reduce(function(s, p) { return s + SharedDB.safeNum(p.gMult, 0); }, 0);
+                    bestLocalSetup.activeSlots = recalculatedSlots;
+                    bestLocalSetup.pureGenMult = leadGMult + recalcActiveSum + pSumOnly;
+                }
+
                 var finalUsedNos = new Set(bestLocalSetup.usedNos);
                 var leadBaseWithAdjEst2 = SharedDB.safeNum(leadCard.baseAttack, 1000) + SharedDB.safeNum(leadItem.adjAtkBonus, 0);
                 var guardMultFactor = 1 + (bestLocalSetup.pureGenMult + SharedDB.safeNum(leadItem.adjBuffBonus, 0) + SharedDB.safeNum(goBuffValue, 7000)) / 100;
@@ -771,7 +1028,7 @@ window.SoloEngine = (function() {
                     var sVal = SharedDB.safeNum(parseSkill(firstS, leadBestWeather).leadBuff, leadItem.firstGMult || 0);
                     var kMult = SharedDB.getKakuseiMultiplier(leadCard);
                     masterList.push({
-                        role: 'lead', card: leadCard,
+                        role: 'lead', card: leadCard, isSameBaseAsAce: true,
                         originalCost: SharedDB.safeNum(leadCard.originalCost !== undefined ? leadCard.originalCost : leadCard.cost, 4.5),
                         maxCost: SharedDB.safeNum(leadCard.maxFukushoCost, 4.5),
                         firstSkillVal: sVal, baseCopyVal: sVal / kMult, firstSkillObj: firstS, isGekirei: false, firstRawAdd: 0, baseCopyRawAdd: 0
@@ -782,11 +1039,11 @@ window.SoloEngine = (function() {
                     var it = bestLocalSetup.activeSlots[sId];
                     if (it.card && !SharedDB.isHaBusho(it.card) && SharedDB.safeNum(it.card.maxFukushoCost, 0) > 0) {
                         var firstS2 = (it.card.skills && it.card.skills[0]) || {};
-                        var slotW = it.weather || AppCards.slotWeathers[sId] || 'SUN';
-                        var sVal2 = SharedDB.safeNum(parseSkill(firstS2, slotW).gMult, it.firstGMult || it.gMult || 0);
+                        var sVal2 = SharedDB.safeNum(it.firstGMult, 0);
                         var kMult2 = SharedDB.getKakuseiMultiplier(it.card);
+                        var isSameBaseSlot = isHonkyoAttack ? (sId.indexOf('h') === 0) : (sId.indexOf('k') === 0);
                         masterList.push({
-                            role: 'active', slotId: sId, card: it.card,
+                            role: 'active', slotId: sId, card: it.card, isSameBaseAsAce: isSameBaseSlot,
                             originalCost: SharedDB.safeNum(it.card.originalCost !== undefined ? it.card.originalCost : it.card.cost, 4.5),
                             maxCost: SharedDB.safeNum(it.card.maxFukushoCost, 4.5),
                             firstSkillVal: sVal2, baseCopyVal: sVal2 / kMult2, firstSkillObj: firstS2, isGekirei: false, firstRawAdd: 0, baseCopyRawAdd: 0
@@ -794,17 +1051,62 @@ window.SoloEngine = (function() {
                     }
                 });
 
-                bestLocalSetup.basePassives.concat(bestLocalSetup.subPassives, allGuardPicked).forEach(function(p) {
+                bestLocalSetup.basePassives.forEach(function(p) {
                     if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0) {
                         var firstS3 = (p.card.skills && p.card.skills[0]) || {};
-                        var fRaw = SharedDB.safeNum(p.firstRawAdd !== undefined ? p.firstRawAdd : p.rawAdd, 0);
-                        var fG = SharedDB.safeNum(p.firstGMult !== undefined ? p.firstGMult : p.gMult, 0);
+                        var fRaw = SharedDB.safeNum(p.firstRawAdd, 0);
+                        var fG = SharedDB.safeNum(p.firstGMult, 0);
                         var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
                         masterList.push({
-                            role: 'passive', card: p.card,
+                            role: 'passive', card: p.card, isSameBaseAsAce: isHonkyoAttack,
                             originalCost: SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5),
                             maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
-                            firstSkillVal: fG, baseCopyVal: fG / kMult3, firstSkillObj: firstS3, isGekirei: Boolean(p.isGekirei),
+                            firstSkillVal: fG, baseCopyVal: fG / kMult3, firstSkillObj: firstS3, isGekirei: Boolean(p.isGekirei && fRaw > 0),
+                            firstRawAdd: fRaw, baseCopyRawAdd: fRaw / kMult3
+                        });
+                    }
+                });
+                bestLocalSetup.subPassives.forEach(function(p) {
+                    if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0) {
+                        var firstS3 = (p.card.skills && p.card.skills[0]) || {};
+                        var fRaw = SharedDB.safeNum(p.firstRawAdd, 0);
+                        var fG = SharedDB.safeNum(p.firstGMult, 0);
+                        var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
+                        masterList.push({
+                            role: 'passive', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
+                            originalCost: SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5),
+                            maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
+                            firstSkillVal: fG, baseCopyVal: fG / kMult3, firstSkillObj: firstS3, isGekirei: Boolean(p.isGekirei && fRaw > 0),
+                            firstRawAdd: fRaw, baseCopyRawAdd: fRaw / kMult3
+                        });
+                    }
+                });
+                hGuardPicked.forEach(function(p) {
+                    if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0) {
+                        var firstS3 = (p.card.skills && p.card.skills[0]) || {};
+                        var fRaw = SharedDB.safeNum(p.firstRawAdd, 0);
+                        var fG = SharedDB.safeNum(p.firstGMult, 0);
+                        var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
+                        masterList.push({
+                            role: 'passive', card: p.card, isSameBaseAsAce: isHonkyoAttack,
+                            originalCost: SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5),
+                            maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
+                            firstSkillVal: fG, baseCopyVal: fG / kMult3, firstSkillObj: firstS3, isGekirei: Boolean(p.isGekirei && fRaw > 0),
+                            firstRawAdd: fRaw, baseCopyRawAdd: fRaw / kMult3
+                        });
+                    }
+                });
+                kGuardPicked.forEach(function(p) {
+                    if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0) {
+                        var firstS3 = (p.card.skills && p.card.skills[0]) || {};
+                        var fRaw = SharedDB.safeNum(p.firstRawAdd, 0);
+                        var fG = SharedDB.safeNum(p.firstGMult, 0);
+                        var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
+                        masterList.push({
+                            role: 'passive', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
+                            originalCost: SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5),
+                            maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
+                            firstSkillVal: fG, baseCopyVal: fG / kMult3, firstSkillObj: firstS3, isGekirei: Boolean(p.isGekirei && fRaw > 0),
                             firstRawAdd: fRaw, baseCopyRawAdd: fRaw / kMult3
                         });
                     }
@@ -914,7 +1216,7 @@ window.SoloEngine = (function() {
                             var gc = availableGeneralPool[gi];
                             var gcNo = gc.cardNo || gc.uniqueId;
                             if (usedMirrorIds.has(gc.uniqueId) || usedMirrorNos.has(gcNo)) continue;
-                            var gCand = buildSoloGeneralAdjutantCand(gc, master.role, leadBestWeather);
+                            var gCand = buildSoloGeneralAdjutantCand(gc, master.role, leadBestWeather, master.isSameBaseAsAce);
                             if (gCand) validGenCands.push(gCand);
                         }
 
@@ -1220,12 +1522,12 @@ window.SoloEngine = (function() {
                         <span><i class="fa-solid fa-chess-rook text-amber-500 mr-2"></i>本拠 に配置するサポート</span>
                         <span class="text-xs font-mono ${setup.honkyoCost > setup.honkyoLimit ? 'text-red-400' : 'text-gray-300'} font-bold">表コスト: ${setup.honkyoCost.toFixed(1)} / ${setup.honkyoLimit.toFixed(1)}</span>
                     </div>
-                    <div class="text-xs text-blue-400 mb-2"><i class="fa-solid fa-hand-pointer mr-1"></i>内政セット枠 (手動)</div>
+                    <div class="text-xs text-blue-400 mb-2"><i class="fa-solid fa-hand-pointer mr-1"></i>内政セット枠 (手動・「防:」内政官のみ)</div>
                     <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 mb-4">${renderActiveSlotHTML('h0', '1. 本拠')}${renderActiveSlotHTML('h1', '2. 塔')}</div>
-                    <div class="text-xs text-gray-400 mb-1"><i class="fa-solid fa-bolt mr-1"></i>出撃デッキ空き枠 (パッシブ・檄令: ${setup.chosenBasePassives.length}枚)</div>
+                    <div class="text-xs text-gray-400 mb-1"><i class="fa-solid fa-bolt mr-1"></i>出撃デッキ空き枠 (パッシブ・檄令のみ有効: ${setup.chosenBasePassives.length}枚)</div>
                     <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3 mb-4">${renderCardListHTML(setup.chosenBasePassives, false)}</div>
                     <div class="mt-4 border-t border-gray-700 pt-2 flex justify-between text-xs text-purple-400 mb-1">
-                        <span><i class="fa-solid fa-shield-halved mr-1"></i>裏・警護デッキ (${setup.chosenBaseGuards.length}枚)</span>
+                        <span><i class="fa-solid fa-shield-halved mr-1"></i>裏・警護デッキ (パッシブのみ有効: ${setup.chosenBaseGuards.length}枚)</span>
                         <span class="font-mono text-gray-400 font-bold">裏コスト: ${setup.honkyoGuardCost.toFixed(1)} / ${setup.honkyoLimit.toFixed(1)}</span>
                     </div>
                     <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3">${renderCardListHTML(setup.chosenBaseGuards, true)}</div>
@@ -1236,16 +1538,16 @@ window.SoloEngine = (function() {
                         <span><i class="fa-solid fa-tents text-blue-400 mr-2"></i>拠点＋ に配置するサポート</span>
                         <span class="text-xs font-mono ${setup.kyotenCost > setup.kyotenLimit ? 'text-red-400' : 'text-gray-300'} font-bold">表コスト: ${setup.kyotenCost.toFixed(1)} / ${setup.kyotenLimit.toFixed(1)}</span>
                     </div>
-                    <div class="text-xs text-blue-400 mb-2"><i class="fa-solid fa-hand-pointer mr-1"></i>内政セット枠 (手動)</div>
+                    <div class="text-xs text-blue-400 mb-2"><i class="fa-solid fa-hand-pointer mr-1"></i>内政セット枠 (手動・「防:」内政官のみ)</div>
                     <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
                         ${renderActiveSlotHTML('k0', '3. 拠点1')}${renderActiveSlotHTML('k1', '4. 拠点2')}${renderActiveSlotHTML('k2', '5. 拠点3')}
                         ${renderActiveSlotHTML('k3', '6. 拠点4')}${renderActiveSlotHTML('k4', '7. 拠点5')}${renderActiveSlotHTML('k5', '8. 拠点6')}
                         ${renderActiveSlotHTML('k6', '9. 拠点7')}${renderActiveSlotHTML('k7', '10. 拠点8')}${renderActiveSlotHTML('k8', '11. 拠点9')}
                     </div>
-                    <div class="text-xs text-gray-400 mb-1"><i class="fa-solid fa-bolt mr-1"></i>出撃デッキ空き枠 (パッシブ・檄令: ${setup.chosenSubPassives.length}枚)</div>
+                    <div class="text-xs text-gray-400 mb-1"><i class="fa-solid fa-bolt mr-1"></i>出撃デッキ空き枠 (パッシブ・檄令のみ有効: ${setup.chosenSubPassives.length}枚)</div>
                     <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3 mb-4">${renderCardListHTML(setup.chosenSubPassives, false)}</div>
                     <div class="mt-4 border-t border-gray-700 pt-2 flex justify-between text-xs text-purple-400 mb-1">
-                        <span><i class="fa-solid fa-shield-halved mr-1"></i>裏・警護デッキ (${setup.chosenSubGuards.length}枚)</span>
+                        <span><i class="fa-solid fa-shield-halved mr-1"></i>裏・警護デッキ (パッシブのみ有効: ${setup.chosenSubGuards.length}枚)</span>
                         <span class="font-mono text-gray-400 font-bold">裏コスト: ${setup.kyotenGuardCost.toFixed(1)} / ${setup.kyotenLimit.toFixed(1)}</span>
                     </div>
                     <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3">${renderCardListHTML(setup.chosenSubGuards, true)}</div>
