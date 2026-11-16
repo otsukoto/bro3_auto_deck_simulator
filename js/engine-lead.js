@@ -1,6 +1,6 @@
 // ========================================================
-// 【引率火力計算エンジン】js/engine-lead.js (Ver. 2.00)
-// 役割：引率攻撃・破壊10枠最適化、一般アクティブ1枠制限・覇全アクティブ同時、サポート副将のパッシブ限定＆拠点縛り除外
+// 【引率火力計算エンジン】js/engine-lead.js (Ver. 2.02)
+// 役割：引率攻撃・破壊10枠最適化、2パス反復2次元ナップサックDP（副将ミラー実測フィードバックによるSL副将2枠vs覇の厳密比較）、サポート副将制限
 // ========================================================
 window.LeadEngine = (function() {
     var isLeadHighland = false;
@@ -143,7 +143,6 @@ window.LeadEngine = (function() {
             return result;
         }
 
-        // パッシブ（自動発動）判定
         var hasExplicitManual = /(?:スキル使用中|スキル発動時|発動すると|一定時間|勅令|襲令|斗魂令|号令|戦陣|極意)/.test(desc) &&
                                 desc.indexOf("自動で発動") === -1 && desc.indexOf("自動発動") === -1;
 
@@ -299,10 +298,7 @@ window.LeadEngine = (function() {
 
         var evalMode = (masterRole === 'lead') ? 'lead' : 'support';
         var p0 = parseLeadSkill(s0, targetTroopData, weatherObj, evalMode, leadCard);
-        // サポート武将(masterRole !== 'lead')にはパッシブ(p0.isPassive)を持つ一般武将のみ副将配置可能
         if (masterRole !== 'lead' && !p0.isPassive) return null;
-
-        // 拠点縛りスキルを持つ副将は、エースと同じ拠点に配置された主将にしか付けられない
         if (!isSameBaseAsAce && p0.mustBeSameBase) return null;
 
         var tVal = SharedDB.safeNum(p0.tMult, 0);
@@ -338,7 +334,6 @@ window.LeadEngine = (function() {
         var isHa = SharedDB.isHaBusho(card);
         var kMultSelf = SharedDB.getKakuseiMultiplier(card);
 
-        // 1. 引率エース（mode === 'lead'）評価
         if (mode === 'lead') {
             if (!baseParsed.isLead) return { tMult: 0, gMult: 0, firstTMult: 0, firstGMult: 0 };
             var leadPassiveT = 0, leadPassiveG = 0;
@@ -403,7 +398,6 @@ window.LeadEngine = (function() {
             };
         }
 
-        // 2. サポート（mode === 'support'）厳密評価
         if (!baseParsed.isSupport) return emptySupport;
 
         var passiveOnlyT = 0, passiveOnlyG = 0;
@@ -561,6 +555,62 @@ window.LeadEngine = (function() {
         };
     }
 
+    // =========================================================================
+    // 2次元ナップサックDP：コスト上限(costLimit) と 内政スロット上限(maxNaiseiSlots)
+    // を同時に満たしながら「低コスト内政官＋低コストパッシブ複数」の総合バフを厳密最大化！
+    // =========================================================================
+    function solveLeadDeckKnapsackWithNaiseiLimits(costLimit, maxNaiseiSlots, candidates) {
+        var maxW = Math.max(0, Math.round(costLimit * 2));
+        var maxN = Math.max(0, maxNaiseiSlots);
+        var NEG = -1e15;
+
+        var dp = new Array(maxW + 1);
+        var pick = new Array(maxW + 1);
+        for (var w = 0; w <= maxW; w++) {
+            dp[w] = new Array(maxN + 1);
+            pick[w] = new Array(maxN + 1);
+            for (var n = 0; n <= maxN; n++) {
+                dp[w][n] = NEG;
+                pick[w][n] = [];
+            }
+        }
+        dp[0][0] = 0;
+
+        for (var i = 0; i < candidates.length; i++) {
+            var it = candidates[i];
+            var iw = Math.round(SharedDB.safeNum(it.effectiveCost, 0) * 2);
+            if (iw <= 0 || iw > maxW) continue;
+            var dn = it.isManualNaisei ? 1 : 0;
+            if (dn > maxN) continue;
+            var val = SharedDB.safeNum(it.dpScore, it.tMult);
+
+            for (var c = maxW; c >= iw; c--) {
+                for (var n = maxN; n >= dn; n--) {
+                    var prev = dp[c - iw][n - dn];
+                    if (prev > NEG / 2) {
+                        var candVal = prev + val;
+                        if (candVal > dp[c][n]) {
+                            dp[c][n] = candVal;
+                            pick[c][n] = pick[c - iw][n - dn].concat([it]);
+                        }
+                    }
+                }
+            }
+        }
+
+        var bestVal = -1;
+        var bestPicked = [];
+        for (var c2 = 0; c2 <= maxW; c2++) {
+            for (var n2 = 0; n2 <= maxN; n2++) {
+                if (dp[c2][n2] > bestVal) {
+                    bestVal = dp[c2][n2];
+                    bestPicked = pick[c2][n2];
+                }
+            }
+        }
+        return { val: Math.max(0, bestVal), picked: bestPicked };
+    }
+
     function fastUpdateLeadMultiplier() {
         if (!currentLeadOptimizedSetup) { run(false); return; }
         var altMultiplier = isLeadHighland ? 1.2 : 1.0;
@@ -665,6 +715,11 @@ window.LeadEngine = (function() {
                 }
             }
 
+            // 利用可能ミラー鏡の豊富さに応じた初期副将コピー期待係数（Pass 1 用）
+            var mirrorCount = allMirrorPool.length;
+            var initSlCopyRatio = isReassignMode ? (mirrorCount >= 18 ? 1.55 : (mirrorCount >= 10 ? 1.15 : 0.65)) : 0;
+            var initLCopyRatio = isReassignMode ? (mirrorCount >= 18 ? 0.65 : (mirrorCount >= 10 ? 0.45 : 0.25)) : 0;
+
             var leadCandidates = [];
             for (var li = 0; li < validCards.length; li++) {
                 var c = validCards[li];
@@ -715,7 +770,7 @@ window.LeadEngine = (function() {
                 var cKey = SharedDB.isHaBusho(leadCard) ? '覇' : (leadCard.country || '他');
                 if (supportPoolsByCountry[cKey]) return supportPoolsByCountry[cKey];
 
-                var shureiPool = [], allActivesPool = [], globalPassivePool = [], boundPassivePool = [], guardPool = [];
+                var shureiPool = [], frontGlobalPool = [], frontBoundPool = [], guardPool = [];
                 for (var si = 0; si < validCards.length; si++) {
                     var sc = validCards[si];
                     if (usedTeisenCardIds.has(sc.uniqueId)) continue;
@@ -724,63 +779,90 @@ window.LeadEngine = (function() {
                     var nProbe = bestSup.naiseiEval;
                     var effCost = effectiveCostMap[sc.uniqueId];
 
+                    var hasAdjSlot = (!SharedDB.isHaBusho(sc) && SharedDB.safeNum(sc.maxFukushoCost, 0) > 0 && isReassignMode);
+                    var scRarity = String(sc.rarity || 'SL').toUpperCase();
+                    var estRatio = !hasAdjSlot ? 0 : (scRarity === 'SL' ? initSlCopyRatio : initLCopyRatio);
+                    var kSelf = SharedDB.getKakuseiMultiplier(sc);
+
                     if (pProbe && pProbe.canBeGuardSlot) {
+                        var gBonusEst = hasAdjSlot ? ((SharedDB.safeNum(pProbe.firstTMult, 0) / kSelf) * estRatio) : 0;
                         guardPool.push({
-                            card: sc, effectiveCost: effCost,
+                            card: sc, effectiveCost: effCost, cost: effCost,
                             tMult: pProbe.tMult, gMult: pProbe.gMult,
+                            dpScore: pProbe.tMult + gBonusEst,
                             firstTMult: pProbe.firstTMult, firstGMult: pProbe.firstGMult,
-                            isBound: pProbe.passiveMustBeSameBase, isShurei: false,
+                            isBound: pProbe.passiveMustBeSameBase, isShurei: false, isManualNaisei: false,
                             weather: bestSup.bestPassiveWeather
                         });
                     }
 
-                    if (pProbe && pProbe.canBePassiveSlot) {
-                        var pItem = {
-                            card: sc, effectiveCost: effCost,
-                            tMult: pProbe.tMult, gMult: pProbe.gMult,
-                            firstTMult: pProbe.firstTMult, firstGMult: pProbe.firstGMult,
-                            isBound: pProbe.passiveMustBeSameBase, isShurei: false,
-                            weather: bestSup.bestPassiveWeather
-                        };
-                        if (pProbe.passiveMustBeSameBase) boundPassivePool.push(pItem);
-                        else globalPassivePool.push(pItem);
-                    }
+                    var canNaisei = Boolean(nProbe && nProbe.canBeNaiseiSlot && nProbe.naiseiTMult > 0);
+                    var canPassive = Boolean(pProbe && pProbe.canBePassiveSlot && pProbe.tMult > 0);
 
-                    if (nProbe && nProbe.canBeNaiseiSlot) {
-                        if (nProbe.isShurei) {
-                            var originW = shouldAutoWeather ? bestSup.bestWeather : (AppCards.slotWeathers[originSlotId] || 'SUN');
-                            var ev = evaluateCardLead(sc, targetTroopData, originW, 'support', leadCard, isReassignMode);
-                            if (ev.canBeNaiseiSlot && ev.naiseiTMult > 0) {
-                                shureiPool.push({
-                                    card: sc, effectiveCost: effCost,
-                                    tMult: ev.naiseiTMult, gMult: ev.naiseiGMult,
-                                    firstTMult: ev.naiseiFirstTMult, firstGMult: 0,
-                                    marginalGain: SharedDB.safeNum(ev.naiseiMarginalGain, 0),
-                                    isBound: ev.naiseiMustBeSameBase, isShurei: true,
-                                    weather: originW
-                                });
-                            }
-                        } else {
-                            allActivesPool.push({
-                                card: sc, effectiveCost: effCost,
-                                tMult: nProbe.naiseiTMult, gMult: nProbe.naiseiGMult,
-                                firstTMult: nProbe.naiseiFirstTMult, firstGMult: 0,
-                                marginalGain: SharedDB.safeNum(nProbe.naiseiMarginalGain, 0),
-                                isBound: nProbe.naiseiMustBeSameBase, isShurei: false,
-                                weather: bestSup.bestWeather
+                    if (canNaisei && nProbe.isShurei) {
+                        var originW = shouldAutoWeather ? bestSup.bestWeather : (AppCards.slotWeathers[originSlotId] || 'SUN');
+                        var ev = evaluateCardLead(sc, targetTroopData, originW, 'support', leadCard, isReassignMode);
+                        if (ev.canBeNaiseiSlot && ev.naiseiTMult > 0) {
+                            var sBonusEst = hasAdjSlot ? ((SharedDB.safeNum(ev.naiseiFirstTMult, 0) / kSelf) * estRatio) : 0;
+                            shureiPool.push({
+                                card: sc, effectiveCost: effCost, cost: effCost,
+                                tMult: ev.naiseiTMult, gMult: ev.naiseiGMult,
+                                dpScore: ev.naiseiTMult + sBonusEst,
+                                firstTMult: ev.naiseiFirstTMult, firstGMult: 0,
+                                marginalGain: SharedDB.safeNum(ev.naiseiMarginalGain, 0),
+                                isBound: ev.naiseiMustBeSameBase, isShurei: true, isManualNaisei: true,
+                                weather: originW
                             });
                         }
+                    } else if (canNaisei && (!canPassive || nProbe.naiseiTMult >= pProbe.tMult)) {
+                        var nBonusEst = hasAdjSlot ? ((SharedDB.safeNum(nProbe.naiseiFirstTMult, 0) / kSelf) * estRatio) : 0;
+                        var nItem = {
+                            card: sc, effectiveCost: effCost, cost: effCost,
+                            tMult: nProbe.naiseiTMult, gMult: nProbe.naiseiGMult,
+                            dpScore: nProbe.naiseiTMult + nBonusEst,
+                            firstTMult: nProbe.naiseiFirstTMult, firstGMult: 0,
+                            marginalGain: SharedDB.safeNum(nProbe.naiseiMarginalGain, 0),
+                            isBound: nProbe.naiseiMustBeSameBase, isShurei: false, isManualNaisei: true,
+                            weather: bestSup.bestWeather
+                        };
+                        if (nProbe.naiseiMustBeSameBase) frontBoundPool.push(nItem);
+                        else frontGlobalPool.push(nItem);
+                    } else if (canPassive) {
+                        var pBonusEst = hasAdjSlot ? ((SharedDB.safeNum(pProbe.firstTMult, 0) / kSelf) * estRatio) : 0;
+                        var pItem = {
+                            card: sc, effectiveCost: effCost, cost: effCost,
+                            tMult: pProbe.tMult, gMult: pProbe.gMult,
+                            dpScore: pProbe.tMult + pBonusEst,
+                            firstTMult: pProbe.firstTMult, firstGMult: pProbe.firstGMult,
+                            isBound: pProbe.passiveMustBeSameBase, isShurei: false, isManualNaisei: false,
+                            weather: bestSup.bestPassiveWeather
+                        };
+                        if (pProbe.passiveMustBeSameBase) frontBoundPool.push(pItem);
+                        else frontGlobalPool.push(pItem);
                     }
                 }
                 supportPoolsByCountry[cKey] = {
                     shureiPool: shureiPool,
-                    allActivesPool: allActivesPool,
-                    globalPassivePool: globalPassivePool,
-                    boundPassivePool: boundPassivePool,
+                    frontGlobalPool: frontGlobalPool,
+                    frontBoundPool: frontBoundPool,
                     guardPool: guardPool
                 };
                 return supportPoolsByCountry[cKey];
             }
+
+            var dedupByCardNo = function(pool, usedNosSet) {
+                var bestMap = Object.create(null);
+                for (var idx = 0; idx < pool.length; idx++) {
+                    var it = pool[idx];
+                    var cNo = it.card.cardNo || it.card.uniqueId;
+                    if (usedNosSet && usedNosSet.has(cNo)) continue;
+                    var sc = SharedDB.safeNum(it.dpScore, it.tMult);
+                    if (!bestMap[cNo] || sc > SharedDB.safeNum(bestMap[cNo].dpScore, bestMap[cNo].tMult)) {
+                        bestMap[cNo] = it;
+                    }
+                }
+                return Object.values(bestMap);
+            };
 
             var bestSetup = { finalTotalDamage: -1 };
 
@@ -795,459 +877,483 @@ window.LeadEngine = (function() {
 
                 var pools = getSupportPoolsForLead(leadCard);
                 var shureiPool = pools.shureiPool.filter(function(x) { return x.card.uniqueId !== leadCard.uniqueId && (x.card.cardNo || x.card.uniqueId) !== leadNo && x.tMult > 0; });
-                var allActivesPool = pools.allActivesPool.filter(function(x) { return x.card.uniqueId !== leadCard.uniqueId && (x.card.cardNo || x.card.uniqueId) !== leadNo && x.tMult > 0; });
-                var globalPassivePool = pools.globalPassivePool.filter(function(x) { return x.card.uniqueId !== leadCard.uniqueId && (x.card.cardNo || x.card.uniqueId) !== leadNo && x.tMult > 0; });
-                var boundPassivePool = pools.boundPassivePool.filter(function(x) { return x.card.uniqueId !== leadCard.uniqueId && (x.card.cardNo || x.card.uniqueId) !== leadNo && x.tMult > 0; });
+                var frontGlobalPool = pools.frontGlobalPool.filter(function(x) { return x.card.uniqueId !== leadCard.uniqueId && (x.card.cardNo || x.card.uniqueId) !== leadNo && x.tMult > 0; });
+                var frontBoundPool = pools.frontBoundPool.filter(function(x) { return x.card.uniqueId !== leadCard.uniqueId && (x.card.cardNo || x.card.uniqueId) !== leadNo && x.tMult > 0; });
                 var guardPool = pools.guardPool.filter(function(x) { return x.card.uniqueId !== leadCard.uniqueId && (x.card.cardNo || x.card.uniqueId) !== leadNo && x.tMult > 0; });
 
-                var chosenShurei = null;
-                shureiPool.sort(function(a, b) { return (b.marginalGain - a.marginalGain) || (b.tMult - a.tMult); });
-                if (shureiPool.length > 0) chosenShurei = shureiPool[0];
+                // =====================================================================
+                // 2パス反復DP評価関数：
+                // Pass 1（初期推定）で構築したデッキに実際に副将を割り当て、
+                // その副将実測バフ（adjBonusOverrideMap）をフィードバックして Pass 2 の DP を再実行！
+                // =====================================================================
+                function evaluateFullLeadPlan(adjBonusOverrideMap) {
+                    var applyOverride = function(arr) {
+                        if (!adjBonusOverrideMap) return arr;
+                        return arr.map(function(it) {
+                            var ov = adjBonusOverrideMap[it.card.uniqueId];
+                            if (ov !== undefined) {
+                                return Object.assign({}, it, { dpScore: it.tMult + ov });
+                            }
+                            return it;
+                        });
+                    };
 
-                var shureiCost = chosenShurei ? chosenShurei.effectiveCost : 0.0;
-                var shureiBuff = chosenShurei ? chosenShurei.tMult : 0.0;
-                var originInitCost = leadEffCost + shureiCost;
-                if (originInitCost > originLimit) return;
+                    var curShureiPool = applyOverride(shureiPool);
+                    var curGlobalPool = applyOverride(frontGlobalPool);
+                    var curBoundPool = applyOverride(frontBoundPool);
+                    var curGuardPool = applyOverride(guardPool);
 
-                var globalActives = allActivesPool.filter(function(a) { return !a.isBound && a.tMult > 0; });
-                var topGlobals = globalActives.slice().sort(function(a, b) { return (b.marginalGain - a.marginalGain) || (b.tMult - a.tMult); });
-                var evalGlobals = topGlobals.slice(0, Math.min(6, topGlobals.length));
-                var hSlotPatterns = [];
-
-                if (!isHonkyoAttack) {
-                    for (var i = 0; i < evalGlobals.length; i++) {
-                        for (var j = i + 1; j < evalGlobals.length; j++) {
-                            var noI = evalGlobals[i].card.cardNo || evalGlobals[i].card.uniqueId;
-                            var noJ = evalGlobals[j].card.cardNo || evalGlobals[j].card.uniqueId;
-                            if (noI !== noJ) hSlotPatterns.push([evalGlobals[i], evalGlobals[j]]);
-                        }
-                    }
-                    for (var i = 0; i < evalGlobals.length; i++) hSlotPatterns.push([evalGlobals[i]]);
-                    hSlotPatterns.push([]);
-                } else {
-                    var h1Candidates = allActivesPool.filter(function(a) { return !a.isShurei && a.tMult > 0; }).sort(function(a, b) { return (b.marginalGain - a.marginalGain) || (b.tMult - a.tMult); });
-                    var topH1 = h1Candidates.slice(0, Math.min(6, h1Candidates.length));
-                    for (var i = 0; i < topH1.length; i++) hSlotPatterns.push([topH1[i]]);
-                    hSlotPatterns.push([]);
-                }
-
-                var bestLocalBuff = -1;
-                var bestLocalSetup = null;
-
-                for (var patIdx = 0; patIdx < hSlotPatterns.length; patIdx++) {
-                    var hPair = hSlotPatterns[patIdx];
-                    var curHCost = isHonkyoAttack ? (originInitCost + (hPair[0] ? hPair[0].effectiveCost : 0)) : hPair.reduce(function(s, x) { return s + x.effectiveCost; }, 0);
-                    if (curHCost > honkyoLimit) continue;
-
-                    var usedNos = new Set([leadNo]);
-                    if (chosenShurei) usedNos.add(chosenShurei.card.cardNo || chosenShurei.card.uniqueId);
-                    hPair.forEach(function(x) { usedNos.add(x.card.cardNo || x.card.uniqueId); });
-
-                    var curKCost = isHonkyoAttack ? 0.0 : originInitCost;
-                    var kActives = [];
-                    var remActivesForK = (!isHonkyoAttack ? allActivesPool : globalActives).filter(function(a) {
-                        var aNo = a.card.cardNo || a.card.uniqueId;
-                        return !usedNos.has(aNo) && !a.isShurei && a.tMult > 0;
+                    var shureiByBuff = dedupByCardNo(curShureiPool, null).sort(function(a, b) {
+                        return SharedDB.safeNum(b.dpScore, b.tMult) - SharedDB.safeNum(a.dpScore, a.tMult);
                     });
-                    remActivesForK.sort(function(a, b) { return (b.marginalGain - a.marginalGain) || (b.tMult - a.tMult); });
+                    var shureiByEff = dedupByCardNo(curShureiPool, null).sort(function(a, b) {
+                        return (SharedDB.safeNum(b.dpScore, b.tMult) / Math.max(0.5, b.effectiveCost)) -
+                               (SharedDB.safeNum(a.dpScore, a.tMult) / Math.max(0.5, a.effectiveCost));
+                    });
+                    var shureiPatterns = [null];
+                    var seenShureiNos = new Set();
+                    shureiByBuff.slice(0, 3).concat(shureiByEff.slice(0, 3)).forEach(function(sIt) {
+                        var sNo = sIt.card.cardNo || sIt.card.uniqueId;
+                        if (!seenShureiNos.has(sNo)) {
+                            seenShureiNos.add(sNo);
+                            shureiPatterns.push(sIt);
+                        }
+                    });
 
-                    for (var ai = 0; ai < remActivesForK.length; ai++) {
-                        var act = remActivesForK[ai];
-                        var actNo = act.card.cardNo || act.card.uniqueId;
-                        var maxSlots = isHonkyoAttack ? 9 : 8;
-                        if (kActives.length < maxSlots && !usedNos.has(actNo) && (curKCost + act.effectiveCost <= kyotenLimit)) {
-                            kActives.push(act);
-                            curKCost += act.effectiveCost;
-                            usedNos.add(actNo);
+                    var bestLocalScore = -1;
+                    var bestLocalSetup = null;
+
+                    for (var spIdx = 0; spIdx < shureiPatterns.length; spIdx++) {
+                        var chosenShurei = shureiPatterns[spIdx];
+                        var shureiCost = chosenShurei ? chosenShurei.effectiveCost : 0.0;
+                        var shureiBuff = chosenShurei ? chosenShurei.tMult : 0.0;
+                        var shureiDpScore = chosenShurei ? SharedDB.safeNum(chosenShurei.dpScore, chosenShurei.tMult) : 0.0;
+                        var originInitCost = leadEffCost + shureiCost;
+                        if (originInitCost > originLimit + 1e-6) continue;
+
+                        var baseUsedNos = new Set([leadNo]);
+                        if (chosenShurei) baseUsedNos.add(chosenShurei.card.cardNo || chosenShurei.card.uniqueId);
+
+                        var hCapCost = isHonkyoAttack ? (honkyoLimit - originInitCost) : honkyoLimit;
+                        var kCapCost = isHonkyoAttack ? kyotenLimit : (kyotenLimit - originInitCost);
+                        var maxHNaiseiSlots = isHonkyoAttack ? (chosenShurei ? 1 : 2) : 2;
+                        var maxKNaiseiSlots = isHonkyoAttack ? 9 : (chosenShurei ? 8 : 9);
+
+                        var strategies = [1, 2];
+                        for (var stIdx = 0; stIdx < strategies.length; stIdx++) {
+                            var strat = strategies[stIdx];
+                            var usedNos = new Set(baseUsedNos);
+                            var hManual = [], kManual = [], hPassives = [], kPassives = [];
+
+                            if (isHonkyoAttack) {
+                                if (strat === 1) {
+                                    var kAvail1 = dedupByCardNo(curGlobalPool, usedNos);
+                                    var kRes1 = solveLeadDeckKnapsackWithNaiseiLimits(kCapCost, maxKNaiseiSlots, kAvail1);
+                                    kRes1.picked.forEach(function(x) {
+                                        usedNos.add(x.card.cardNo || x.card.uniqueId);
+                                        if (x.isManualNaisei) kManual.push(x);
+                                        else kPassives.push(x);
+                                    });
+                                    var hAvail1 = dedupByCardNo(curBoundPool.concat(curGlobalPool), usedNos);
+                                    var hRes1 = solveLeadDeckKnapsackWithNaiseiLimits(hCapCost, maxHNaiseiSlots, hAvail1);
+                                    hRes1.picked.forEach(function(x) {
+                                        usedNos.add(x.card.cardNo || x.card.uniqueId);
+                                        if (x.isManualNaisei) hManual.push(x);
+                                        else hPassives.push(x);
+                                    });
+                                } else {
+                                    var hAvail2 = dedupByCardNo(curBoundPool.concat(curGlobalPool), usedNos);
+                                    var hRes2 = solveLeadDeckKnapsackWithNaiseiLimits(hCapCost, maxHNaiseiSlots, hAvail2);
+                                    hRes2.picked.forEach(function(x) {
+                                        usedNos.add(x.card.cardNo || x.card.uniqueId);
+                                        if (x.isManualNaisei) hManual.push(x);
+                                        else hPassives.push(x);
+                                    });
+                                    var kAvail2 = dedupByCardNo(curGlobalPool, usedNos);
+                                    var kRes2 = solveLeadDeckKnapsackWithNaiseiLimits(kCapCost, maxKNaiseiSlots, kAvail2);
+                                    kRes2.picked.forEach(function(x) {
+                                        usedNos.add(x.card.cardNo || x.card.uniqueId);
+                                        if (x.isManualNaisei) kManual.push(x);
+                                        else kPassives.push(x);
+                                    });
+                                }
+                            } else {
+                                if (strat === 1) {
+                                    var hAvail3 = dedupByCardNo(curGlobalPool, usedNos);
+                                    var hRes3 = solveLeadDeckKnapsackWithNaiseiLimits(hCapCost, maxHNaiseiSlots, hAvail3);
+                                    hRes3.picked.forEach(function(x) {
+                                        usedNos.add(x.card.cardNo || x.card.uniqueId);
+                                        if (x.isManualNaisei) hManual.push(x);
+                                        else hPassives.push(x);
+                                    });
+                                    var kAvail3 = dedupByCardNo(curBoundPool.concat(curGlobalPool), usedNos);
+                                    var kRes3 = solveLeadDeckKnapsackWithNaiseiLimits(kCapCost, maxKNaiseiSlots, kAvail3);
+                                    kRes3.picked.forEach(function(x) {
+                                        usedNos.add(x.card.cardNo || x.card.uniqueId);
+                                        if (x.isManualNaisei) kManual.push(x);
+                                        else kPassives.push(x);
+                                    });
+                                } else {
+                                    var kAvail4 = dedupByCardNo(curBoundPool.concat(curGlobalPool), usedNos);
+                                    var kRes4 = solveLeadDeckKnapsackWithNaiseiLimits(kCapCost, maxKNaiseiSlots, kAvail4);
+                                    kRes4.picked.forEach(function(x) {
+                                        usedNos.add(x.card.cardNo || x.card.uniqueId);
+                                        if (x.isManualNaisei) kManual.push(x);
+                                        else kPassives.push(x);
+                                    });
+                                    var hAvail4 = dedupByCardNo(curGlobalPool, usedNos);
+                                    var hRes4 = solveLeadDeckKnapsackWithNaiseiLimits(hCapCost, maxHNaiseiSlots, hAvail4);
+                                    hRes4.picked.forEach(function(x) {
+                                        usedNos.add(x.card.cardNo || x.card.uniqueId);
+                                        if (x.isManualNaisei) hManual.push(x);
+                                        else hPassives.push(x);
+                                    });
+                                }
+                            }
+
+                            var allPickedItems = hManual.concat(kManual, hPassives, kPassives);
+                            var rawBuffTotal = shureiBuff + allPickedItems.reduce(function(s, x) { return s + x.tMult; }, 0);
+                            var dpTotalScore = shureiDpScore + allPickedItems.reduce(function(s, x) { return s + SharedDB.safeNum(x.dpScore, x.tMult); }, 0);
+
+                            if (dpTotalScore > bestLocalScore) {
+                                bestLocalScore = dpTotalScore;
+                                var currentSlots = {};
+                                if (chosenShurei) currentSlots[originSlotId] = Object.assign({}, chosenShurei, { isShurei: true });
+
+                                hManual.sort(function(a, b) { return b.tMult - a.tMult; });
+                                kManual.sort(function(a, b) { return b.tMult - a.tMult; });
+                                hPassives.sort(function(a, b) { return b.tMult - a.tMult; });
+                                kPassives.sort(function(a, b) { return b.tMult - a.tMult; });
+
+                                if (!isHonkyoAttack) {
+                                    for (var hi = 0; hi < hManual.length; hi++) currentSlots['h' + hi] = hManual[hi];
+                                    for (var ki = 0; ki < kManual.length; ki++) currentSlots['k' + (ki + 1)] = kManual[ki];
+                                } else {
+                                    for (var hi2 = 0; hi2 < hManual.length; hi2++) currentSlots['h' + (hi2 + 1)] = hManual[hi2];
+                                    for (var ki2 = 0; ki2 < kManual.length; ki2++) currentSlots['k' + ki2] = kManual[ki2];
+                                }
+
+                                var hTotalCost = (isHonkyoAttack ? originInitCost : 0) +
+                                                 hManual.reduce(function(s, x) { return s + x.effectiveCost; }, 0) +
+                                                 hPassives.reduce(function(s, x) { return s + x.effectiveCost; }, 0);
+                                var kTotalCost = (!isHonkyoAttack ? originInitCost : 0) +
+                                                 kManual.reduce(function(s, x) { return s + x.effectiveCost; }, 0) +
+                                                 kPassives.reduce(function(s, x) { return s + x.effectiveCost; }, 0);
+
+                                bestLocalSetup = {
+                                    activeSlots: currentSlots,
+                                    basePassives: hPassives,
+                                    subPassives: kPassives,
+                                    totalSupportTMult: rawBuffTotal,
+                                    hCost: hTotalCost,
+                                    kCost: kTotalCost,
+                                    activeCountBase: Object.keys(currentSlots).filter(function(s) { return s.indexOf('h') === 0; }).length,
+                                    activeCountSub: Object.keys(currentSlots).filter(function(s) { return s.indexOf('k') === 0; }).length,
+                                    usedNos: usedNos
+                                };
+                            }
                         }
                     }
 
-                    var hRemCost = honkyoLimit - curHCost;
-                    var kRemCost = kyotenLimit - curKCost;
+                    if (!bestLocalSetup) return null;
 
-                    var filterBestPerNo = function(pool) {
+                    if (!shouldAutoWeather) {
+                        var recalcSlots = {};
+                        var recalcActiveTotal = 0;
+                        Object.keys(bestLocalSetup.activeSlots).forEach(function(sId) {
+                            var sItem = bestLocalSetup.activeSlots[sId];
+                            var slotW = AppCards.slotWeathers[sId] || sItem.weather || 'SUN';
+                            var reEv = evaluateCardLead(sItem.card, targetTroopData, slotW, 'support', leadCard, isReassignMode);
+                            var updatedItem = Object.assign({}, sItem, {
+                                tMult: SharedDB.safeNum(reEv.naiseiTMult, 0),
+                                gMult: SharedDB.safeNum(reEv.naiseiGMult, 0),
+                                firstTMult: SharedDB.safeNum(reEv.naiseiFirstTMult, 0),
+                                weather: slotW
+                            });
+                            recalcSlots[sId] = updatedItem;
+                            recalcActiveTotal += updatedItem.tMult;
+                        });
+                        var pTotalOnly = bestLocalSetup.basePassives.concat(bestLocalSetup.subPassives).reduce(function(s, p) { return s + SharedDB.safeNum(p.tMult, 0); }, 0);
+                        bestLocalSetup.activeSlots = recalcSlots;
+                        bestLocalSetup.totalSupportTMult = recalcActiveTotal + pTotalOnly;
+                    }
+
+                    var finalUsedNos = new Set(bestLocalSetup.usedNos);
+                    var filterBestGuardPerNo = function(pool) {
                         var bestMap = Object.create(null);
-                        for (var pi = 0; pi < pool.length; pi++) {
-                            var x = pool[pi];
-                            var xNo = x.card.cardNo || x.card.uniqueId;
-                            if (usedNos.has(xNo) || x.tMult <= 0) continue;
+                        for (var gi = 0; gi < pool.length; gi++) {
+                            var g = pool[gi];
+                            var gNo = g.card.cardNo || g.card.uniqueId;
+                            if (finalUsedNos.has(gNo) || g.tMult <= 0) continue;
                             var dpItem = {
-                                card: x.card, cost: x.effectiveCost, effectiveCost: x.effectiveCost,
-                                tMult: x.tMult, gMult: x.gMult,
-                                firstTMult: x.firstTMult, firstGMult: x.firstGMult, isBound: x.isBound
+                                card: g.card, cost: g.effectiveCost, effectiveCost: g.effectiveCost,
+                                tMult: SharedDB.safeNum(g.dpScore, g.tMult), rawTMult: g.tMult, gMult: g.gMult,
+                                firstTMult: g.firstTMult, firstGMult: g.firstGMult, isBound: g.isBound
                             };
-                            if (!bestMap[xNo] || dpItem.tMult > bestMap[xNo].tMult) bestMap[xNo] = dpItem;
+                            if (!bestMap[gNo] || dpItem.tMult > bestMap[gNo].tMult) bestMap[gNo] = dpItem;
                         }
                         return Object.values(bestMap);
                     };
 
-                    var availGlobalPassives = filterBestPerNo(globalPassivePool);
-                    var availBoundPassives = filterBestPerNo(boundPassivePool);
+                    var availGuards = filterBestGuardPerNo(curGuardPool);
+                    var hGuards = SharedDB.solveKnapsackDP(honkyoLimit, availGuards.filter(function(x) { return !x.isBound || isHonkyoAttack; }));
+                    var hGuardPicked = hGuards.picked.map(function(x) { return Object.assign({}, x, { tMult: x.rawTMult }); });
+                    var hGuardNos = new Set(hGuardPicked.map(function(x) { return x.card.cardNo || x.card.uniqueId; }));
+                    var kGuards = SharedDB.solveKnapsackDP(kyotenLimit, availGuards.filter(function(x) { return (!x.isBound || !isHonkyoAttack) && !hGuardNos.has(x.card.cardNo || x.card.uniqueId); }));
+                    var kGuardPicked = kGuards.picked.map(function(x) { return Object.assign({}, x, { tMult: x.rawTMult }); });
 
-                    var pickedHPassives = [], pickedKPassives = [], passivesBuffSum = 0;
-                    if (!isHonkyoAttack) {
-                        var kRes = SharedDB.solveKnapsackDP(kRemCost, availBoundPassives);
-                        pickedKPassives = kRes.picked; passivesBuffSum += kRes.val;
-                        var pKNos = new Set(pickedKPassives.map(function(p) { return p.card.cardNo || p.card.uniqueId; }));
-                        var remGP1 = availGlobalPassives.filter(function(p) { return !pKNos.has(p.card.cardNo || p.card.uniqueId); });
-                        var hRes = SharedDB.solveKnapsackDP(hRemCost, remGP1);
-                        pickedHPassives = hRes.picked; passivesBuffSum += hRes.val;
-                        var pHNos = new Set(pickedHPassives.map(function(p) { return p.card.cardNo || p.card.uniqueId; }));
-                        var remGlobalP = remGP1.filter(function(p) { return !pHNos.has(p.card.cardNo || p.card.uniqueId); });
-                        var kExtra = kRemCost - pickedKPassives.reduce(function(s, p) { return s + p.effectiveCost; }, 0);
-                        if (kExtra >= 0.5 && remGlobalP.length > 0) {
-                            var exK = SharedDB.solveKnapsackDP(kExtra, remGlobalP);
-                            pickedKPassives = pickedKPassives.concat(exK.picked); passivesBuffSum += exK.val;
-                        }
-                    } else {
-                        var hRes = SharedDB.solveKnapsackDP(hRemCost, availBoundPassives);
-                        pickedHPassives = hRes.picked; passivesBuffSum += hRes.val;
-                        var pHNos2 = new Set(pickedHPassives.map(function(p) { return p.card.cardNo || p.card.uniqueId; }));
-                        var remGP2 = availGlobalPassives.filter(function(p) { return !pHNos2.has(p.card.cardNo || p.card.uniqueId); });
-                        var kRes = SharedDB.solveKnapsackDP(kRemCost, remGP2);
-                        pickedKPassives = kRes.picked; passivesBuffSum += kRes.val;
-                        var pKNos2 = new Set(pickedKPassives.map(function(p) { return p.card.cardNo || p.card.uniqueId; }));
-                        var remGlobalP2 = remGP2.filter(function(p) { return !pKNos2.has(p.card.cardNo || p.card.uniqueId); });
-                        var hExtra = hRemCost - pickedHPassives.reduce(function(s, p) { return s + p.effectiveCost; }, 0);
-                        if (hExtra >= 0.5 && remGlobalP2.length > 0) {
-                            var exH = SharedDB.solveKnapsackDP(hExtra, remGlobalP2);
-                            pickedHPassives = pickedHPassives.concat(exH.picked); passivesBuffSum += exH.val;
-                        }
+                    var guardBuffSum = hGuardPicked.concat(kGuardPicked).reduce(function(s, x) { return s + x.tMult; }, 0);
+                    var totalSupportTMult = bestLocalSetup.totalSupportTMult + guardBuffSum;
+
+                    var assignedAdjutantsMap = (leadAdjutantMode === 'CURRENT') ? null : Object.create(null);
+                    var additionalAdjutantBuff = 0;
+                    var additionalAdjutantGenBuff = 0;
+                    var adjutantAddedBuffMap = Object.create(null);
+                    var adjutantAddedGenBuffMap = Object.create(null);
+                    var usedAdjutantCostMap = Object.create(null);
+                    var leadAdjutantAtkBonus = 0;
+
+                    var allDeckUsedIds = new Set([leadCard.uniqueId]);
+                    var allDeckUsedNos = new Set([leadNo]);
+                    Object.values(bestLocalSetup.activeSlots).forEach(function(x) {
+                        allDeckUsedIds.add(x.card.uniqueId);
+                        allDeckUsedNos.add(x.card.cardNo || x.card.uniqueId);
+                    });
+                    bestLocalSetup.basePassives.concat(bestLocalSetup.subPassives, hGuardPicked, kGuardPicked).forEach(function(x) {
+                        allDeckUsedIds.add(x.card.uniqueId);
+                        allDeckUsedNos.add(x.card.cardNo || x.card.uniqueId);
+                    });
+
+                    var usedMirrorIds = new Set();
+                    var usedMirrorNos = new Set();
+
+                    var masterList = [];
+                    if (!SharedDB.isHaBusho(leadCard) && SharedDB.safeNum(leadCard.maxFukushoCost, 0) > 0) {
+                        var kMult = SharedDB.getKakuseiMultiplier(leadCard);
+                        masterList.push({
+                            role: 'lead', card: leadCard, isSameBaseAsAce: true,
+                            maxCost: SharedDB.safeNum(leadCard.maxFukushoCost, 4.5),
+                            baseCopyVal: leadItem.firstTMult / kMult,
+                            baseCopyGenVal: leadItem.firstGMult / kMult,
+                            priority: 100000000 + leadItem.firstTMult + leadItem.firstGMult
+                        });
                     }
-
-                    var activeBuffSum = hPair.reduce(function(s, x) { return s + x.tMult; }, 0) + kActives.reduce(function(s, x) { return s + x.tMult; }, 0);
-                    var currentTotalBuff = shureiBuff + activeBuffSum + passivesBuffSum;
-
-                    if (currentTotalBuff > bestLocalBuff) {
-                        bestLocalBuff = currentTotalBuff;
-                        var currentSlots = {};
-                        if (chosenShurei) currentSlots[originSlotId] = Object.assign({}, chosenShurei, { isShurei: true });
-                        if (!isHonkyoAttack) {
-                            if (hPair[0]) currentSlots['h0'] = hPair[0];
-                            if (hPair[1]) currentSlots['h1'] = hPair[1];
-                            for (var ki = 0; ki < kActives.length; ki++) currentSlots['k' + (ki + 1)] = kActives[ki];
-                        } else {
-                            if (hPair[0]) currentSlots['h1'] = hPair[0];
-                            for (var ki = 0; ki < kActives.length; ki++) currentSlots['k' + ki] = kActives[ki];
-                        }
-
-                        var actualUsedNos = new Set(usedNos);
-                        pickedHPassives.concat(pickedKPassives).forEach(function(p) { actualUsedNos.add(p.card.cardNo || p.card.uniqueId); });
-
-                        bestLocalSetup = {
-                            activeSlots: currentSlots,
-                            basePassives: pickedHPassives,
-                            subPassives: pickedKPassives,
-                            totalSupportTMult: currentTotalBuff,
-                            hCost: curHCost + pickedHPassives.reduce(function(sum, x) { return sum + x.effectiveCost; }, 0),
-                            kCost: curKCost + pickedKPassives.reduce(function(sum, x) { return sum + x.effectiveCost; }, 0),
-                            activeCountBase: Object.keys(currentSlots).filter(function(s) { return s.indexOf('h') === 0; }).length,
-                            activeCountSub: Object.keys(currentSlots).filter(function(s) { return s.indexOf('k') === 0; }).length,
-                            usedNos: actualUsedNos
-                        };
-                    }
-                }
-
-                if (!bestLocalSetup) return;
-
-                if (!shouldAutoWeather) {
-                    var recalcSlots = {};
-                    var recalcActiveTotal = 0;
                     Object.keys(bestLocalSetup.activeSlots).forEach(function(sId) {
-                        var sItem = bestLocalSetup.activeSlots[sId];
-                        var slotW = AppCards.slotWeathers[sId] || sItem.weather || 'SUN';
-                        var reEv = evaluateCardLead(sItem.card, targetTroopData, slotW, 'support', leadCard, isReassignMode);
-                        var updatedItem = Object.assign({}, sItem, {
-                            tMult: SharedDB.safeNum(reEv.naiseiTMult, 0),
-                            gMult: SharedDB.safeNum(reEv.naiseiGMult, 0),
-                            firstTMult: SharedDB.safeNum(reEv.naiseiFirstTMult, 0),
-                            weather: slotW
-                        });
-                        recalcSlots[sId] = updatedItem;
-                        recalcActiveTotal += updatedItem.tMult;
+                        var it = bestLocalSetup.activeSlots[sId];
+                        if (it.card && !SharedDB.isHaBusho(it.card) && SharedDB.safeNum(it.card.maxFukushoCost, 0) > 0 && it.firstTMult > 0) {
+                            var kMult2 = SharedDB.getKakuseiMultiplier(it.card);
+                            var isSameBaseSlot = isHonkyoAttack ? (sId.indexOf('h') === 0) : (sId.indexOf('k') === 0);
+                            masterList.push({
+                                role: 'active', card: it.card, isSameBaseAsAce: isSameBaseSlot,
+                                maxCost: SharedDB.safeNum(it.card.maxFukushoCost, 4.5),
+                                baseCopyVal: it.firstTMult / kMult2,
+                                baseCopyGenVal: 0,
+                                priority: 5000000 + it.firstTMult
+                            });
+                        }
                     });
-                    var pTotalOnly = bestLocalSetup.basePassives.concat(bestLocalSetup.subPassives).reduce(function(s, p) { return s + SharedDB.safeNum(p.tMult, 0); }, 0);
-                    bestLocalSetup.activeSlots = recalcSlots;
-                    bestLocalSetup.totalSupportTMult = recalcActiveTotal + pTotalOnly;
-                }
-
-                var finalUsedNos = new Set(bestLocalSetup.usedNos);
-                var filterBestGuardPerNo = function(pool) {
-                    var bestMap = Object.create(null);
-                    for (var gi = 0; gi < pool.length; gi++) {
-                        var g = pool[gi];
-                        var gNo = g.card.cardNo || g.card.uniqueId;
-                        if (finalUsedNos.has(gNo) || g.tMult <= 0) continue;
-                        var dpItem = {
-                            card: g.card, cost: g.effectiveCost, effectiveCost: g.effectiveCost,
-                            tMult: g.tMult, gMult: g.gMult,
-                            firstTMult: g.firstTMult, firstGMult: g.firstGMult, isBound: g.isBound
-                        };
-                        if (!bestMap[gNo] || dpItem.tMult > bestMap[gNo].tMult) bestMap[gNo] = dpItem;
-                    }
-                    return Object.values(bestMap);
-                };
-
-                var availGuards = filterBestGuardPerNo(guardPool);
-                var hGuards = SharedDB.solveKnapsackDP(honkyoLimit, availGuards.filter(function(x) { return !x.isBound || isHonkyoAttack; }));
-                var hGuardPicked = hGuards.picked;
-                var hGuardNos = new Set(hGuardPicked.map(function(x) { return x.card.cardNo || x.card.uniqueId; }));
-                var kGuards = SharedDB.solveKnapsackDP(kyotenLimit, availGuards.filter(function(x) { return (!x.isBound || !isHonkyoAttack) && !hGuardNos.has(x.card.cardNo || x.card.uniqueId); }));
-                var kGuardPicked = kGuards.picked;
-
-                var guardBuffSum = hGuards.val + kGuards.val;
-                var totalSupportTMult = bestLocalSetup.totalSupportTMult + guardBuffSum;
-
-                var assignedAdjutantsMap = (leadAdjutantMode === 'CURRENT') ? null : Object.create(null);
-                var additionalAdjutantBuff = 0;
-                var additionalAdjutantGenBuff = 0;
-                var adjutantAddedBuffMap = Object.create(null);
-                var adjutantAddedGenBuffMap = Object.create(null);
-                var usedAdjutantCostMap = Object.create(null);
-                var leadAdjutantAtkBonus = 0;
-
-                var allDeckUsedIds = new Set([leadCard.uniqueId]);
-                var allDeckUsedNos = new Set([leadNo]);
-                Object.values(bestLocalSetup.activeSlots).forEach(function(x) {
-                    allDeckUsedIds.add(x.card.uniqueId);
-                    allDeckUsedNos.add(x.card.cardNo || x.card.uniqueId);
-                });
-                bestLocalSetup.basePassives.concat(bestLocalSetup.subPassives, hGuardPicked, kGuardPicked).forEach(function(x) {
-                    allDeckUsedIds.add(x.card.uniqueId);
-                    allDeckUsedNos.add(x.card.cardNo || x.card.uniqueId);
-                });
-
-                var usedMirrorIds = new Set();
-                var usedMirrorNos = new Set();
-
-                var masterList = [];
-                if (!SharedDB.isHaBusho(leadCard) && SharedDB.safeNum(leadCard.maxFukushoCost, 0) > 0) {
-                    var kMult = SharedDB.getKakuseiMultiplier(leadCard);
-                    masterList.push({
-                        role: 'lead', card: leadCard, isSameBaseAsAce: true,
-                        maxCost: SharedDB.safeNum(leadCard.maxFukushoCost, 4.5),
-                        baseCopyVal: leadItem.firstTMult / kMult,
-                        baseCopyGenVal: leadItem.firstGMult / kMult,
-                        priority: 100000000 + leadItem.firstTMult + leadItem.firstGMult
+                    bestLocalSetup.basePassives.forEach(function(p) {
+                        if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && p.firstTMult > 0) {
+                            var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
+                            masterList.push({
+                                role: 'passive', card: p.card, isSameBaseAsAce: isHonkyoAttack,
+                                maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
+                                baseCopyVal: p.firstTMult / kMult3,
+                                baseCopyGenVal: 0,
+                                priority: 1000000 + p.firstTMult
+                            });
+                        }
                     });
-                }
-                Object.keys(bestLocalSetup.activeSlots).forEach(function(sId) {
-                    var it = bestLocalSetup.activeSlots[sId];
-                    if (it.card && !SharedDB.isHaBusho(it.card) && SharedDB.safeNum(it.card.maxFukushoCost, 0) > 0 && it.firstTMult > 0) {
-                        var kMult2 = SharedDB.getKakuseiMultiplier(it.card);
-                        var isSameBaseSlot = isHonkyoAttack ? (sId.indexOf('h') === 0) : (sId.indexOf('k') === 0);
-                        masterList.push({
-                            role: 'active', card: it.card, isSameBaseAsAce: isSameBaseSlot,
-                            maxCost: SharedDB.safeNum(it.card.maxFukushoCost, 4.5),
-                            baseCopyVal: it.firstTMult / kMult2,
-                            baseCopyGenVal: 0,
-                            priority: 5000000 + it.firstTMult
-                        });
-                    }
-                });
-                bestLocalSetup.basePassives.forEach(function(p) {
-                    if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && p.firstTMult > 0) {
-                        var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
-                        masterList.push({
-                            role: 'passive', card: p.card, isSameBaseAsAce: isHonkyoAttack,
-                            maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
-                            baseCopyVal: p.firstTMult / kMult3,
-                            baseCopyGenVal: 0,
-                            priority: 1000000 + p.firstTMult
-                        });
-                    }
-                });
-                bestLocalSetup.subPassives.forEach(function(p) {
-                    if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && p.firstTMult > 0) {
-                        var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
-                        masterList.push({
-                            role: 'passive', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
-                            maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
-                            baseCopyVal: p.firstTMult / kMult3,
-                            baseCopyGenVal: 0,
-                            priority: 1000000 + p.firstTMult
-                        });
-                    }
-                });
-                hGuardPicked.forEach(function(p) {
-                    if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && p.firstTMult > 0) {
-                        var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
-                        masterList.push({
-                            role: 'passive', card: p.card, isSameBaseAsAce: isHonkyoAttack,
-                            maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
-                            baseCopyVal: p.firstTMult / kMult3,
-                            baseCopyGenVal: 0,
-                            priority: 1000000 + p.firstTMult
-                        });
-                    }
-                });
-                kGuardPicked.forEach(function(p) {
-                    if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && p.firstTMult > 0) {
-                        var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
-                        masterList.push({
-                            role: 'passive', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
-                            maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
-                            baseCopyVal: p.firstTMult / kMult3,
-                            baseCopyGenVal: 0,
-                            priority: 1000000 + p.firstTMult
-                        });
-                    }
-                });
-
-                masterList.sort(function(a, b) { return b.priority - a.priority; });
-
-                masterList.forEach(function(master) {
-                    var mCard = master.card;
-                    adjutantAddedBuffMap[mCard.uniqueId] = 0;
-                    adjutantAddedGenBuffMap[mCard.uniqueId] = 0;
-                    usedAdjutantCostMap[mCard.uniqueId] = 0;
-                    var existing = [];
-                    if ((leadAdjutantMode === 'CURRENT' || leadAdjutantMode === 'FILL_EMPTY') && Array.isArray(mCard.fukusho)) {
-                        mCard.fukusho.forEach(function(rawFk) {
-                            var inf = SharedDB.getMirrorSkillInfo(rawFk);
-                            var st = SharedDB.getAdjutantStatusEffect(rawFk, inf);
-                            var fkCost = SharedDB.safeNum(rawFk.cost, 0);
-                            usedAdjutantCostMap[mCard.uniqueId] += fkCost;
-                            if (master.role === 'lead') leadAdjutantAtkBonus += st.atkBonus;
-
-                            if (inf) {
-                                var rate = SharedDB.calcAdjutantEffectiveCopyRate(mCard, rawFk, inf);
-                                var fkId = String(rawFk.uniqueId || rawFk.id || rawFk.cardNo || '');
-                                var fkNo = String(rawFk.cardNo || fkId);
-                                if (fkId) usedMirrorIds.add(fkId);
-                                if (fkNo) usedMirrorNos.add(fkNo);
-                                existing.push(Object.assign({}, rawFk, {
-                                    copyRate: rate,
-                                    label: formatMirrorLabelWithCost(inf, rate)
-                                }));
-                                var addB = master.baseCopyVal * (rate / 100);
-                                var addG = master.baseCopyGenVal * (rate / 100);
-                                additionalAdjutantBuff += addB;
-                                additionalAdjutantGenBuff += addG;
-                                adjutantAddedBuffMap[mCard.uniqueId] += addB;
-                                adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
-                            } else {
-                                existing.push(rawFk);
-                            }
-                        });
-                    }
-                    if (assignedAdjutantsMap) assignedAdjutantsMap[mCard.uniqueId] = existing;
-                });
-
-                if (leadAdjutantMode !== 'CURRENT') {
-                    var availableMirrors = allMirrorPool.filter(function(m) {
-                        return !allDeckUsedIds.has(m.uniqueId) && !allDeckUsedNos.has(m.cardNo) && !usedTeisenCardIds.has(m.uniqueId);
+                    bestLocalSetup.subPassives.forEach(function(p) {
+                        if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && p.firstTMult > 0) {
+                            var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
+                            masterList.push({
+                                role: 'passive', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
+                                maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
+                                baseCopyVal: p.firstTMult / kMult3,
+                                baseCopyGenVal: 0,
+                                priority: 1000000 + p.firstTMult
+                            });
+                        }
                     });
-                    var availableGeneralPool = allGeneralPool.filter(function(gc) {
-                        return !allDeckUsedIds.has(gc.uniqueId) &&
-                               !allDeckUsedNos.has(gc.cardNo || gc.uniqueId) &&
-                               !usedTeisenCardIds.has(gc.uniqueId);
+                    hGuardPicked.forEach(function(p) {
+                        if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && p.firstTMult > 0) {
+                            var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
+                            masterList.push({
+                                role: 'passive', card: p.card, isSameBaseAsAce: isHonkyoAttack,
+                                maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
+                                baseCopyVal: p.firstTMult / kMult3,
+                                baseCopyGenVal: 0,
+                                priority: 1000000 + p.firstTMult
+                            });
+                        }
+                    });
+                    kGuardPicked.forEach(function(p) {
+                        if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && p.firstTMult > 0) {
+                            var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
+                            masterList.push({
+                                role: 'passive', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
+                                maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
+                                baseCopyVal: p.firstTMult / kMult3,
+                                baseCopyGenVal: 0,
+                                priority: 1000000 + p.firstTMult
+                            });
+                        }
                     });
 
-                    var troopWeight = (targetTroopData.attack * troopCount) / 100;
-                    var leadBestW = leadItem.bestWeather || 'SUN';
+                    masterList.sort(function(a, b) { return b.priority - a.priority; });
 
                     masterList.forEach(function(master) {
                         var mCard = master.card;
-                        var mRarity = String(mCard.rarity || 'SL').toUpperCase();
-                        var maxSlots = mRarity === 'SL' ? 2 : 1;
-                        var currentAssigned = assignedAdjutantsMap[mCard.uniqueId];
+                        adjutantAddedBuffMap[mCard.uniqueId] = 0;
+                        adjutantAddedGenBuffMap[mCard.uniqueId] = 0;
+                        usedAdjutantCostMap[mCard.uniqueId] = 0;
+                        var existing = [];
+                        if ((leadAdjutantMode === 'CURRENT' || leadAdjutantMode === 'FILL_EMPTY') && Array.isArray(mCard.fukusho)) {
+                            mCard.fukusho.forEach(function(rawFk) {
+                                var inf = SharedDB.getMirrorSkillInfo(rawFk);
+                                var st = SharedDB.getAdjutantStatusEffect(rawFk, inf);
+                                var fkCost = SharedDB.safeNum(rawFk.cost, 0);
+                                usedAdjutantCostMap[mCard.uniqueId] += fkCost;
+                                if (master.role === 'lead') leadAdjutantAtkBonus += st.atkBonus;
 
-                        if (preTeisenAssignedMap[mCard.uniqueId] && currentAssigned.length < maxSlots) {
-                            var tWrapper = preTeisenAssignedMap[mCard.uniqueId];
-                            var tCard = tWrapper.card || tWrapper;
-                            var tCost = SharedDB.safeNum(tCard.cost, 4.0);
-                            if (usedAdjutantCostMap[mCard.uniqueId] + tCost <= master.maxCost + 1e-6) {
-                                var tSt = SharedDB.getAdjutantStatusEffect(tCard, { type: 'senkyo', rarity: 'SL', rate: 100 });
-                                usedAdjutantCostMap[mCard.uniqueId] += tCost;
-                                if (master.role === 'lead') leadAdjutantAtkBonus += tSt.atkBonus;
-
-                                currentAssigned.push({
-                                    name: tCard.name || '副将の帝仙鏡',
-                                    cardNo: tCard.cardNo || '',
-                                    imageSrc: tCard.imageSrc || (tCard.cardNo ? 'https://3gokushi.jp/img/card/card_' + tCard.cardNo + '.jpg' : ''),
-                                    rarity: 'SL', cost: tCost,
-                                    baseAttack: SharedDB.safeNum(tCard.baseAttack, 0),
-                                    label: (tSt.isBu ? '[武]' : '') + '帝仙鏡 100% [主将C1化]',
-                                    copyRate: 100, uniqueId: tWrapper.uniqueId,
-                                    info: { type: 'senkyo', rate: 100 }
-                                });
-                                var addBT = master.baseCopyVal * 1.0;
-                                var addGT = master.baseCopyGenVal * 1.0;
-                                additionalAdjutantBuff += addBT;
-                                additionalAdjutantGenBuff += addGT;
-                                adjutantAddedBuffMap[mCard.uniqueId] += addBT;
-                                adjutantAddedGenBuffMap[mCard.uniqueId] += addGT;
-                            }
+                                if (inf) {
+                                    var rate = SharedDB.calcAdjutantEffectiveCopyRate(mCard, rawFk, inf);
+                                    var fkId = String(rawFk.uniqueId || rawFk.id || rawFk.cardNo || '');
+                                    var fkNo = String(rawFk.cardNo || fkId);
+                                    if (fkId) usedMirrorIds.add(fkId);
+                                    if (fkNo) usedMirrorNos.add(fkNo);
+                                    existing.push(Object.assign({}, rawFk, {
+                                        copyRate: rate,
+                                        label: formatMirrorLabelWithCost(inf, rate)
+                                    }));
+                                    var addB = master.baseCopyVal * (rate / 100);
+                                    var addG = master.baseCopyGenVal * (rate / 100);
+                                    additionalAdjutantBuff += addB;
+                                    additionalAdjutantGenBuff += addG;
+                                    adjutantAddedBuffMap[mCard.uniqueId] += addB;
+                                    adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
+                                } else {
+                                    existing.push(rawFk);
+                                }
+                            });
                         }
-
-                        if (currentAssigned.length >= maxSlots) return;
-
-                        var unusedForMaster = availableMirrors.filter(function(fk) {
-                            return !usedMirrorIds.has(fk.uniqueId) && !usedMirrorNos.has(fk.cardNo);
-                        });
-                        var validGenCands = [];
-                        for (var gi = 0; gi < availableGeneralPool.length; gi++) {
-                            var gc = availableGeneralPool[gi];
-                            var gcNo = gc.cardNo || gc.uniqueId;
-                            if (usedMirrorIds.has(gc.uniqueId) || usedMirrorNos.has(gcNo)) continue;
-                            var gCand = buildLeadGeneralAdjutantCand(gc, master.role, targetTroopData, leadBestW, leadCard, master.isSameBaseAsAce);
-                            if (gCand) validGenCands.push(gCand);
-                        }
-
-                        var bestCombo = SharedDB.findBestAdjutantCombo(mCard, unusedForMaster, currentAssigned, usedAdjutantCostMap[mCard.uniqueId], {
-                            baseCopyT: master.baseCopyVal,
-                            baseCopyG: master.baseCopyGenVal,
-                            wTroop: troopWeight,
-                            wGen: SharedDB.safeNum(mCard.baseAttack, 1000) / 100,
-                            wAtk: (master.role === 'lead') ? 60 : 0,
-                            generalPool: validGenCands
-                        });
-
-                        bestCombo.forEach(function(chosenFk) {
-                            usedMirrorIds.add(chosenFk.uniqueId);
-                            usedMirrorNos.add(chosenFk.cardNo);
-                            usedAdjutantCostMap[mCard.uniqueId] += chosenFk.cost;
-                            if (master.role === 'lead') leadAdjutantAtkBonus += chosenFk.atkBonus;
-                            currentAssigned.push(chosenFk);
-                            if (chosenFk.isGeneralSkill && chosenFk.genStats) {
-                                var gT = SharedDB.safeNum(chosenFk.genStats.leadT, 0);
-                                var gG = SharedDB.safeNum(chosenFk.genStats.leadG, 0);
-                                additionalAdjutantBuff += gT;
-                                additionalAdjutantGenBuff += gG;
-                                adjutantAddedBuffMap[mCard.uniqueId] += gT;
-                                adjutantAddedGenBuffMap[mCard.uniqueId] += gG;
-                            } else {
-                                var addB = master.baseCopyVal * (chosenFk.copyRate / 100);
-                                var addG = master.baseCopyGenVal * (chosenFk.copyRate / 100);
-                                additionalAdjutantBuff += addB;
-                                additionalAdjutantGenBuff += addG;
-                                adjutantAddedBuffMap[mCard.uniqueId] += addB;
-                                adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
-                            }
-                        });
+                        if (assignedAdjutantsMap) assignedAdjutantsMap[mCard.uniqueId] = existing;
                     });
-                }
 
-                totalSupportTMult += additionalAdjutantBuff;
+                    if (leadAdjutantMode !== 'CURRENT') {
+                        var availableMirrors = allMirrorPool.filter(function(m) {
+                            return !allDeckUsedIds.has(m.uniqueId) && !allDeckUsedNos.has(m.cardNo) && !usedTeisenCardIds.has(m.uniqueId);
+                        });
+                        var availableGeneralPool = allGeneralPool.filter(function(gc) {
+                            return !allDeckUsedIds.has(gc.uniqueId) &&
+                                   !allDeckUsedNos.has(gc.cardNo || gc.uniqueId) &&
+                                   !usedTeisenCardIds.has(gc.uniqueId);
+                        });
 
-                var elGoBuff = document.getElementById('optLeadGoBuff');
-                var currentGo = isLeadGoEnabled ? SharedDB.safeNum(elGoBuff && elGoBuff.value, leadGoBuffValue) : 0;
-                var pureTroopMult = leadTMult + totalSupportTMult;
-                var pureGenMult = leadGMult + additionalAdjutantGenBuff;
-                var finalTroopMult = pureTroopMult + currentGo;
-                var finalGenMult = pureGenMult + currentGo;
+                        var troopWeight = (targetTroopData.attack * troopCount) / 100;
+                        var leadBestW = leadItem.bestWeather || 'SUN';
 
-                var effectiveGenAtk = leadCard.baseAttack + leadAdjutantAtkBonus;
-                var troopDamage = Math.floor(targetTroopData.attack * troopCount * (1 + (finalTroopMult / 100)));
-                var genDamage = Math.floor(effectiveGenAtk * (1 + (finalGenMult / 100)));
-                var baseTotalDamage = troopDamage + genDamage;
-                var altMultiplier = isLeadHighland ? 1.2 : 1.0;
-                var buff10Multiplier = isLeadAttackBuff10 ? 1.1 : 1.0;
-                var finalTotalDamage = Math.floor(baseTotalDamage * altMultiplier * buff10Multiplier);
+                        masterList.forEach(function(master) {
+                            var mCard = master.card;
+                            var mRarity = String(mCard.rarity || 'SL').toUpperCase();
+                            var maxSlots = mRarity === 'SL' ? 2 : 1;
+                            var currentAssigned = assignedAdjutantsMap[mCard.uniqueId];
 
-                if (finalTotalDamage > bestSetup.finalTotalDamage) {
-                    bestSetup = {
+                            if (preTeisenAssignedMap[mCard.uniqueId] && currentAssigned.length < maxSlots) {
+                                var tWrapper = preTeisenAssignedMap[mCard.uniqueId];
+                                var tCard = tWrapper.card || tWrapper;
+                                var tCost = SharedDB.safeNum(tCard.cost, 4.0);
+                                if (usedAdjutantCostMap[mCard.uniqueId] + tCost <= master.maxCost + 1e-6) {
+                                    var tSt = SharedDB.getAdjutantStatusEffect(tCard, { type: 'senkyo', rarity: 'SL', rate: 100 });
+                                    usedAdjutantCostMap[mCard.uniqueId] += tCost;
+                                    if (master.role === 'lead') leadAdjutantAtkBonus += tSt.atkBonus;
+
+                                    currentAssigned.push({
+                                        name: tCard.name || '副将の帝仙鏡',
+                                        cardNo: tCard.cardNo || '',
+                                        imageSrc: tCard.imageSrc || (tCard.cardNo ? 'https://3gokushi.jp/img/card/card_' + tCard.cardNo + '.jpg' : ''),
+                                        rarity: 'SL', cost: tCost,
+                                        baseAttack: SharedDB.safeNum(tCard.baseAttack, 0),
+                                        label: (tSt.isBu ? '[武]' : '') + '帝仙鏡 100% [主将C1化]',
+                                        copyRate: 100, uniqueId: tWrapper.uniqueId,
+                                        info: { type: 'senkyo', rate: 100 }
+                                    });
+                                    var addBT = master.baseCopyVal * 1.0;
+                                    var addGT = master.baseCopyGenVal * 1.0;
+                                    additionalAdjutantBuff += addBT;
+                                    additionalAdjutantGenBuff += addGT;
+                                    adjutantAddedBuffMap[mCard.uniqueId] += addBT;
+                                    adjutantAddedGenBuffMap[mCard.uniqueId] += addGT;
+                                }
+                            }
+
+                            if (currentAssigned.length >= maxSlots) return;
+
+                            var unusedForMaster = availableMirrors.filter(function(fk) {
+                                return !usedMirrorIds.has(fk.uniqueId) && !usedMirrorNos.has(fk.cardNo);
+                            });
+                            var validGenCands = [];
+                            for (var gi = 0; gi < availableGeneralPool.length; gi++) {
+                                var gc = availableGeneralPool[gi];
+                                var gcNo = gc.cardNo || gc.uniqueId;
+                                if (usedMirrorIds.has(gc.uniqueId) || usedMirrorNos.has(gcNo)) continue;
+                                var gCand = buildLeadGeneralAdjutantCand(gc, master.role, targetTroopData, leadBestW, leadCard, master.isSameBaseAsAce);
+                                if (gCand) validGenCands.push(gCand);
+                            }
+
+                            var bestCombo = SharedDB.findBestAdjutantCombo(mCard, unusedForMaster, currentAssigned, usedAdjutantCostMap[mCard.uniqueId], {
+                                baseCopyT: master.baseCopyVal,
+                                baseCopyG: master.baseCopyGenVal,
+                                wTroop: troopWeight,
+                                wGen: SharedDB.safeNum(mCard.baseAttack, 1000) / 100,
+                                wAtk: (master.role === 'lead') ? 60 : 0,
+                                generalPool: validGenCands
+                            });
+
+                            bestCombo.forEach(function(chosenFk) {
+                                usedMirrorIds.add(chosenFk.uniqueId);
+                                usedMirrorNos.add(chosenFk.cardNo);
+                                usedAdjutantCostMap[mCard.uniqueId] += chosenFk.cost;
+                                if (master.role === 'lead') leadAdjutantAtkBonus += chosenFk.atkBonus;
+                                currentAssigned.push(chosenFk);
+                                if (chosenFk.isGeneralSkill && chosenFk.genStats) {
+                                    var gT = SharedDB.safeNum(chosenFk.genStats.leadT, 0);
+                                    var gG = SharedDB.safeNum(chosenFk.genStats.leadG, 0);
+                                    additionalAdjutantBuff += gT;
+                                    additionalAdjutantGenBuff += gG;
+                                    adjutantAddedBuffMap[mCard.uniqueId] += gT;
+                                    adjutantAddedGenBuffMap[mCard.uniqueId] += gG;
+                                } else {
+                                    var addB = master.baseCopyVal * (chosenFk.copyRate / 100);
+                                    var addG = master.baseCopyGenVal * (chosenFk.copyRate / 100);
+                                    additionalAdjutantBuff += addB;
+                                    additionalAdjutantGenBuff += addG;
+                                    adjutantAddedBuffMap[mCard.uniqueId] += addB;
+                                    adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
+                                }
+                            });
+                        });
+                    }
+
+                    totalSupportTMult += additionalAdjutantBuff;
+
+                    var elGoBuff = document.getElementById('optLeadGoBuff');
+                    var currentGo = isLeadGoEnabled ? SharedDB.safeNum(elGoBuff && elGoBuff.value, leadGoBuffValue) : 0;
+                    var pureTroopMult = leadTMult + totalSupportTMult;
+                    var pureGenMult = leadGMult + additionalAdjutantGenBuff;
+                    var finalTroopMult = pureTroopMult + currentGo;
+                    var finalGenMult = pureGenMult + currentGo;
+
+                    var effectiveGenAtk = leadCard.baseAttack + leadAdjutantAtkBonus;
+                    var troopDamage = Math.floor(targetTroopData.attack * troopCount * (1 + (finalTroopMult / 100)));
+                    var genDamage = Math.floor(effectiveGenAtk * (1 + (finalGenMult / 100)));
+                    var baseTotalDamage = troopDamage + genDamage;
+                    var altMultiplier = isLeadHighland ? 1.2 : 1.0;
+                    var buff10Multiplier = isLeadAttackBuff10 ? 1.1 : 1.0;
+                    var finalTotalDamage = Math.floor(baseTotalDamage * altMultiplier * buff10Multiplier);
+
+                    return {
                         finalTotalDamage: finalTotalDamage,
                         baseTotalDamage: baseTotalDamage,
                         troopDamage: troopDamage,
@@ -1284,6 +1390,21 @@ window.LeadEngine = (function() {
                         altMultiplier: altMultiplier,
                         buff10Multiplier: buff10Multiplier
                     };
+                }
+
+                // Pass 1 実行
+                var plan1 = evaluateFullLeadPlan(null);
+                if (!plan1) return;
+                if (plan1.finalTotalDamage > bestSetup.finalTotalDamage) {
+                    bestSetup = plan1;
+                }
+
+                // Pass 2 実行（Pass 1 で実際に付与された副将バフ実績を反映して再DP）
+                if (isReassignMode && plan1.adjutantAddedBuffMap) {
+                    var plan2 = evaluateFullLeadPlan(plan1.adjutantAddedBuffMap);
+                    if (plan2 && plan2.finalTotalDamage > bestSetup.finalTotalDamage) {
+                        bestSetup = plan2;
+                    }
                 }
             });
 
