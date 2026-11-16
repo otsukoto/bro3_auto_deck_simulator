@@ -68,6 +68,7 @@
 
 
 ## ■更新履歴  
+　ｖ2.04　engine-solo.js・engine-lead.js・engine-def.js 警護デッキの副将に副将専用スキルか警悟以外は不可に設定  
 　ｖ2.03　engine-solo.js 最適化  
 　ｖ2.02　engine-lead.js 最適化  
 　ｖ2.00　副将関連のバグフィックス版  
