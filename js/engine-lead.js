@@ -1,6 +1,6 @@
 // ========================================================
-// 【引率火力計算エンジン】js/engine-lead.js (Ver. 2.04)
-// 役割：引率攻撃・破壊10枠最適化、2パス反復2次元ナップサックDP、警護デッキ副将の「警悟」スキル限定制限
+// 【引率火力計算エンジン】js/engine-lead.js (Ver. 2.06)
+// 役割：引率攻撃・破壊10枠最適化、2パス反復2次元ナップサックDP、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）＆警護「警悟」限定・天候判定完全対応
 // ========================================================
 window.LeadEngine = (function() {
     var isLeadHighland = false;
@@ -17,6 +17,22 @@ window.LeadEngine = (function() {
     var RE_TROOP_ATK = /(?<!武将の)攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速|知力|討伐ゲージ))*\s*[がをのは]?\s*([0-9\.]+)[%％]/;
     var RE_ZEN_ATK = /(?:全拠点|自拠点)[^\n。]*?(?:全兵士|全ての兵士|全軍|全兵)[^\n。]*?(?<!武将の)攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速|知力|討伐ゲージ))*\s*[がをのは]?\s*([0-9\.]+)[%％]/;
     var RE_GEN_ATK = /(?:武将の戦闘時|武将)[^\n。]*?攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速|知力|討伐ゲージ))*\s*[がをのは]?\s*([0-9\.]+)[%％]/;
+
+    // 一般武将を副将にセットした際のレアリティ別スキル発動倍率
+    var GENERAL_ADJUTANT_RARITY_RATES = {
+        'SL': 0.80,
+        'L':  0.70,
+        'UR': 0.60,
+        'SR': 0.50,
+        'R':  0.40,
+        'UC': 0.30,
+        'C':  0.20
+    };
+
+    function getGeneralAdjutantRarityRatio(rarity) {
+        var r = String(rarity || 'R').toUpperCase();
+        return GENERAL_ADJUTANT_RARITY_RATES[r] !== undefined ? GENERAL_ADJUTANT_RARITY_RATES[r] : 0.40;
+    }
 
     function formatMirrorLabelWithCost(inf, effRate) {
         if (!inf) return '';
@@ -77,8 +93,14 @@ window.LeadEngine = (function() {
     }
 
     function calcWeatherMultSafe(rawDesc, weatherObj, targetStat) {
-        var cleaned = String(rawDesc || '').replace(/[（\(][^）\)]*?[）\)]/g, ' ');
-        var clauses = cleaned.split(/[。\n\r]+|(?=\s*(?:晴天候|曇|雨|雪|荒天|コスト|兵数|距離|武将|全武将|全兵))/);
+        var cleaned = String(rawDesc || '')
+            .replace(/（/g, ' ')
+            .replace(/）/g, ' ')
+            .replace(/\(/g, ' ')
+            .replace(/\)/g, ' ');
+        var clauses = cleaned.split(
+            /[。\n\r]+|\s+(?=(?:晴天候|晴天|荒天|陰天|悪天候|雨天候|雨天|曇天候|曇天|雪天候|雪天|天候が|(?:[曇雨雪][、・\/／\s]+){1,2}[曇雨雪](?:天候|の時|時)|コスト|兵数|距離|武将|全武将|全兵))/
+        );
         var isSun = (weatherObj === 'SUN');
         var isBad = (weatherObj === 'CLOUD' || weatherObj === 'RAIN' || weatherObj === 'SNOW');
         var bestMult = 1.0;
@@ -87,12 +109,15 @@ window.LeadEngine = (function() {
             var c = clauses[i].trim();
             if (!c) continue;
 
-            var matchedWeather = false;
-            if (isSun && /晴天候時/.test(c)) matchedWeather = true;
-            if (isBad && /(?:荒天時|曇[、・\s]*雨[、・\s]*雪天候時|雨天候時|曇天候時|雪天候時)/.test(c)) matchedWeather = true;
-            if (!matchedWeather) continue;
+            if (!/([0-9\.]+)\s*倍/.test(c)) continue;
 
-            if (/[0-9\.]+[%％]/.test(c)) continue;
+            var matchedWeather = false;
+            if (isSun && /(?:晴天候|晴天|晴の時|天候が晴)/.test(c)) matchedWeather = true;
+            if (isBad && /(?:荒天|陰天|悪天候|(?:[曇雨雪][、・\/／\s]+){1,2}[曇雨雪])/.test(c)) matchedWeather = true;
+            if (weatherObj === 'RAIN' && /(?:雨天候|雨天|雨の時|天候が雨)/.test(c)) matchedWeather = true;
+            if (weatherObj === 'CLOUD' && /(?:曇天候|曇天|曇の時|天候が曇)/.test(c)) matchedWeather = true;
+            if (weatherObj === 'SNOW' && /(?:雪天候|雪天|雪の時|天候が雪)/.test(c)) matchedWeather = true;
+            if (!matchedWeather) continue;
 
             var hasTarget = (c.indexOf(targetStat) !== -1) || (c.indexOf('効果') !== -1) || (c.indexOf('威力') !== -1);
             var hasOtherStat = /(?:移動速度|移速|討伐ゲージ|経験値|資源|知力)/.test(c) ||
@@ -102,8 +127,8 @@ window.LeadEngine = (function() {
 
             var reSpecific = new RegExp('(?:効果|威力|' + targetStat + '(?:力)?)[がはのを]?\\s*([0-9\\.]+)\\s*倍');
             var mMult = c.match(reSpecific);
-            if (!mMult && hasTarget) {
-                mMult = c.match(/(?:晴天候時|荒天時|曇[、・\s]*雨[、・\s]*雪天候時|雨天候時|曇天候時|雪天候時)[はの時に]?\s*([0-9\.]+)\s*倍/);
+            if (!mMult) {
+                mMult = c.match(/(?:晴天候|晴天|荒天|陰天|悪天候|雨天候|雨天|曇天候|曇天|雪天候|雪天|(?:[曇雨雪][、・\/／\s]+){1,2}[曇雨雪])(?:天候)?[はの時に]?\s*([0-9\.]+)\s*倍/);
             }
             if (mMult) {
                 var val = parseFloat(mMult[1]);
@@ -271,8 +296,8 @@ window.LeadEngine = (function() {
         if (mExtra) {
             var extraV = parseFloat(mExtra[1]);
             var okWeather = true;
-            if (normRawDesc.indexOf("晴天候") !== -1 && weatherObj !== 'SUN') okWeather = false;
-            if ((normRawDesc.indexOf("曇") !== -1 || normRawDesc.indexOf("雨") !== -1 || normRawDesc.indexOf("雪") !== -1 || normRawDesc.indexOf("荒天") !== -1) && ['CLOUD', 'RAIN', 'SNOW'].indexOf(weatherObj) === -1) okWeather = false;
+            if ((normRawDesc.indexOf("晴天候") !== -1 || normRawDesc.indexOf("晴天") !== -1) && weatherObj !== 'SUN') okWeather = false;
+            if ((normRawDesc.indexOf("曇") !== -1 || normRawDesc.indexOf("雨") !== -1 || normRawDesc.indexOf("雪") !== -1 || normRawDesc.indexOf("荒天") !== -1 || normRawDesc.indexOf("陰天") !== -1 || normRawDesc.indexOf("悪天候") !== -1) && ['CLOUD', 'RAIN', 'SNOW'].indexOf(weatherObj) === -1) okWeather = false;
             if (okWeather) {
                 if (tMult > 0) tMult += extraV;
                 if (gMult > 0) gMult += extraV;
@@ -285,6 +310,10 @@ window.LeadEngine = (function() {
         return result;
     }
 
+    // =========================================================================
+    // 一般武将を副将にセットした時の第1スキル評価
+    // ※副将のスキル効果はレアリティに応じて SL:80% / L:70% / UR:60% / SR:50% / R:40% で発動
+    // =========================================================================
     function buildLeadGeneralAdjutantCand(gCard, masterRole, targetTroopData, weatherObj, leadCard, isSameBaseAsAce) {
         if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
         var skills = gCard.skills || [];
@@ -296,6 +325,7 @@ window.LeadEngine = (function() {
         var isAttackFirst = (sName.indexOf('攻:') === 0 || sName.indexOf('副攻:') === 0 || sName.indexOf('攻防:') === 0 || sName.indexOf('副攻防:') === 0);
         if (masterRole !== 'lead' && isAttackFirst) return null;
 
+        var adjRatio = getGeneralAdjutantRarityRatio(gCard.rarity);
         var evalMode = (masterRole === 'lead') ? 'lead' : 'support';
         var p0 = parseLeadSkill(s0, targetTroopData, weatherObj, evalMode, leadCard);
         if (masterRole !== 'lead' && !p0.isPassive) return null;
@@ -303,16 +333,17 @@ window.LeadEngine = (function() {
         if (masterRole === 'guard' && !p0.isGuardDeck) return null;
         if (!isSameBaseAsAce && p0.mustBeSameBase) return null;
 
-        var tVal = SharedDB.safeNum(p0.tMult, 0);
-        var gVal = (masterRole === 'lead') ? SharedDB.safeNum(p0.gMult, 0) : 0;
+        var tVal = SharedDB.safeNum(p0.tMult, 0) * adjRatio;
+        var gVal = (masterRole === 'lead') ? (SharedDB.safeNum(p0.gMult, 0) * adjRatio) : 0;
 
         if (masterRole !== 'lead' && tVal <= 0) return null;
         if (tVal <= 0 && gVal <= 0) return null;
 
         var cleanSName = sName.replace(/^(?:攻防|攻|防|変|副攻|副防|副変):/, '').replace(/LV[0-9]+$/i, '');
+        var pctTag = Math.round(adjRatio * 100) + '%';
         var badge = (tVal > 0)
-            ? ('[副]' + cleanSName + ' 兵+' + SharedDB.formatBuffNum(tVal) + '%')
-            : ('[副]' + cleanSName + ' 将+' + SharedDB.formatBuffNum(gVal) + '%');
+            ? ('[副' + pctTag + ']' + cleanSName + ' 兵+' + SharedDB.formatBuffNum(tVal) + '%')
+            : ('[副' + pctTag + ']' + cleanSName + ' 将+' + SharedDB.formatBuffNum(gVal) + '%');
 
         return {
             card: gCard, uniqueId: gCard.uniqueId, cardNo: gCard.cardNo,
@@ -1168,7 +1199,7 @@ window.LeadEngine = (function() {
                             });
                         }
                     });
-                    // 警護デッキに居る主将は role: 'guard' とし、一般武将副将には「警悟」スキル持ちのみ許可
+                    // 警護デッキに居る主将は role: 'guard' とし、副将には「警悟」スキル持ちのみ許可
                     hGuardPicked.forEach(function(p) {
                         if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && p.firstTMult > 0) {
                             var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
@@ -1195,6 +1226,7 @@ window.LeadEngine = (function() {
                     });
 
                     masterList.sort(function(a, b) { return b.priority - a.priority; });
+                    var leadBestW = leadItem.bestWeather || 'SUN';
 
                     masterList.forEach(function(master) {
                         var mCard = master.card;
@@ -1227,7 +1259,21 @@ window.LeadEngine = (function() {
                                     adjutantAddedBuffMap[mCard.uniqueId] += addB;
                                     adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
                                 } else {
-                                    existing.push(rawFk);
+                                    // 一般武将が既存副将として付いている場合もレアリティ倍率（SL80/L70/UR60/SR50/R40）を適用
+                                    var gCandEx = buildLeadGeneralAdjutantCand(rawFk, master.role, targetTroopData, leadBestW, leadCard, master.isSameBaseAsAce);
+                                    if (gCandEx) {
+                                        var fkId2 = String(rawFk.uniqueId || rawFk.id || rawFk.cardNo || '');
+                                        var fkNo2 = String(rawFk.cardNo || fkId2);
+                                        if (fkId2) usedMirrorIds.add(fkId2);
+                                        if (fkNo2) usedMirrorNos.add(fkNo2);
+                                        existing.push(Object.assign({}, rawFk, { label: gCandEx.label }));
+                                        additionalAdjutantBuff += gCandEx.genTMult;
+                                        additionalAdjutantGenBuff += gCandEx.genGMult;
+                                        adjutantAddedBuffMap[mCard.uniqueId] += gCandEx.genTMult;
+                                        adjutantAddedGenBuffMap[mCard.uniqueId] += gCandEx.genGMult;
+                                    } else {
+                                        existing.push(rawFk);
+                                    }
                                 }
                             });
                         }
@@ -1245,7 +1291,6 @@ window.LeadEngine = (function() {
                         });
 
                         var troopWeight = (targetTroopData.attack * troopCount) / 100;
-                        var leadBestW = leadItem.bestWeather || 'SUN';
 
                         masterList.forEach(function(master) {
                             var mCard = master.card;

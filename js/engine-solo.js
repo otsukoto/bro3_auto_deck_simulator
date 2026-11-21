@@ -1,6 +1,6 @@
 // ========================================================
-// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 2.04)
-// 役割：単騎攻撃・破壊10枠最適化、乗算ダメージ実測フィードバック型2パス反復2次元DP、警護デッキ副将の「警悟」スキル限定制限
+// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 2.06)
+// 役割：単騎攻撃・破壊10枠最適化、乗算ダメージ実測フィードバック型2パス反復2次元DP、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）＆警護「警悟」限定対応
 // ========================================================
 window.SoloEngine = (function() {
     var isBuff10 = false;
@@ -19,6 +19,22 @@ window.SoloEngine = (function() {
         'CAV':    { label: '騎兵エース', short: '騎兵', badgeColor: 'bg-amber-600 text-black' },
         'SWORD':  { label: '剣兵エース', short: '剣兵', badgeColor: 'bg-teal-600 text-white' }
     };
+
+    // 一般武将を副将にセットした際のレアリティ別スキル発動倍率
+    var GENERAL_ADJUTANT_RARITY_RATES = {
+        'SL': 0.80,
+        'L':  0.70,
+        'UR': 0.60,
+        'SR': 0.50,
+        'R':  0.40,
+        'UC': 0.30,
+        'C':  0.20
+    };
+
+    function getGeneralAdjutantRarityRatio(rarity) {
+        var r = String(rarity || 'R').toUpperCase();
+        return GENERAL_ADJUTANT_RARITY_RATES[r] !== undefined ? GENERAL_ADJUTANT_RARITY_RATES[r] : 0.40;
+    }
 
     function formatMirrorLabelWithCost(inf, effRate) {
         if (!inf) return '';
@@ -79,8 +95,14 @@ window.SoloEngine = (function() {
     }
 
     function calcWeatherMultSafe(rawDesc, weatherObj, targetStat) {
-        var cleaned = String(rawDesc || '').replace(/[（\(][^）\)]*?[）\)]/g, ' ');
-        var clauses = cleaned.split(/[。\n\r]+|(?=\s*(?:晴天候|曇|雨|雪|荒天|コスト|兵数|距離|武将|全武将|全兵))/);
+        var cleaned = String(rawDesc || '')
+            .replace(/（/g, ' ')
+            .replace(/）/g, ' ')
+            .replace(/\(/g, ' ')
+            .replace(/\)/g, ' ');
+        var clauses = cleaned.split(
+            /[。\n\r]+|\s+(?=(?:晴天候|晴天|荒天|陰天|悪天候|雨天候|雨天|曇天候|曇天|雪天候|雪天|天候が|(?:[曇雨雪][、・\/／\s]+){1,2}[曇雨雪](?:天候|の時|時)|コスト|兵数|距離|武将|全武将|全兵))/
+        );
         var isSun = (weatherObj === 'SUN');
         var isBad = (weatherObj === 'CLOUD' || weatherObj === 'RAIN' || weatherObj === 'SNOW');
         var bestMult = 1.0;
@@ -89,12 +111,15 @@ window.SoloEngine = (function() {
             var c = clauses[i].trim();
             if (!c) continue;
 
-            var matchedWeather = false;
-            if (isSun && /晴天候時/.test(c)) matchedWeather = true;
-            if (isBad && /(?:荒天時|曇[、・\s]*雨[、・\s]*雪天候時|雨天候時|曇天候時|雪天候時)/.test(c)) matchedWeather = true;
-            if (!matchedWeather) continue;
+            if (!/([0-9\.]+)\s*倍/.test(c)) continue;
 
-            if (/[0-9\.]+[%％]/.test(c)) continue;
+            var matchedWeather = false;
+            if (isSun && /(?:晴天候|晴天|晴の時|天候が晴)/.test(c)) matchedWeather = true;
+            if (isBad && /(?:荒天|陰天|悪天候|(?:[曇雨雪][、・\/／\s]+){1,2}[曇雨雪])/.test(c)) matchedWeather = true;
+            if (weatherObj === 'RAIN' && /(?:雨天候|雨天|雨の時|天候が雨)/.test(c)) matchedWeather = true;
+            if (weatherObj === 'CLOUD' && /(?:曇天候|曇天|曇の時|天候が曇)/.test(c)) matchedWeather = true;
+            if (weatherObj === 'SNOW' && /(?:雪天候|雪天|雪の時|天候が雪)/.test(c)) matchedWeather = true;
+            if (!matchedWeather) continue;
 
             var hasTarget = (c.indexOf(targetStat) !== -1) || (c.indexOf('効果') !== -1) || (c.indexOf('威力') !== -1);
             var hasOtherStat = /(?:移動速度|移速|討伐ゲージ|経験値|資源|知力)/.test(c) ||
@@ -104,8 +129,8 @@ window.SoloEngine = (function() {
 
             var reSpecific = new RegExp('(?:効果|威力|' + targetStat + '(?:力)?)[がはのを]?\\s*([0-9\\.]+)\\s*倍');
             var mMult = c.match(reSpecific);
-            if (!mMult && hasTarget) {
-                mMult = c.match(/(?:晴天候時|荒天時|曇[、・\s]*雨[、・\s]*雪天候時|雨天候時|曇天候時|雪天候時)[はの時に]?\s*([0-9\.]+)\s*倍/);
+            if (!mMult) {
+                mMult = c.match(/(?:晴天候|晴天|荒天|陰天|悪天候|雨天候|雨天|曇天候|曇天|雪天候|雪天|(?:[曇雨雪][、・\/／\s]+){1,2}[曇雨雪])(?:天候)?[はの時に]?\s*([0-9\.]+)\s*倍/);
             }
             if (mMult) {
                 var val = parseFloat(mMult[1]);
@@ -218,9 +243,9 @@ window.SoloEngine = (function() {
         var mExtra = normRawDesc.match(/更に(?:攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速))*\s*[がをのは]?)?\s*([0-9\.]+)[%％]/);
         if (mExtra) {
             var extraV = parseFloat(mExtra[1]);
-            if (normRawDesc.indexOf("晴天候") !== -1) {
+            if (normRawDesc.indexOf("晴天候") !== -1 || normRawDesc.indexOf("晴天") !== -1) {
                 if (weatherObj === 'SUN') val += extraV;
-            } else if (normRawDesc.indexOf("曇") !== -1 || normRawDesc.indexOf("雨") !== -1 || normRawDesc.indexOf("雪") !== -1 || normRawDesc.indexOf("荒天") !== -1) {
+            } else if (normRawDesc.indexOf("曇") !== -1 || normRawDesc.indexOf("雨") !== -1 || normRawDesc.indexOf("雪") !== -1 || normRawDesc.indexOf("荒天") !== -1 || normRawDesc.indexOf("陰天") !== -1 || normRawDesc.indexOf("悪天候") !== -1) {
                 if (['CLOUD', 'RAIN', 'SNOW'].indexOf(weatherObj) !== -1) val += extraV;
             } else {
                 val += extraV;
@@ -261,6 +286,10 @@ window.SoloEngine = (function() {
         return res;
     }
 
+    // =========================================================================
+    // 一般武将を副将にセットした時の第1スキル評価
+    // ※副将のスキル効果はレアリティに応じて SL:80% / L:70% / UR:60% / SR:50% / R:40% で発動
+    // =========================================================================
     function buildSoloGeneralAdjutantCand(gCard, masterRole, weatherObj, isSameBaseAsAce) {
         if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
         var skills = gCard.skills || [];
@@ -269,22 +298,25 @@ window.SoloEngine = (function() {
         var sName = String(s0.name || '').trim();
         if (!sName || sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || isDuelSkill(s0)) return null;
 
+        var adjRatio = getGeneralAdjutantRarityRatio(gCard.rarity);
         var p0 = parseSkill(s0, weatherObj);
         var gk0 = SharedDB.getGekireiBonus(s0, gCard.rarity, 4.5);
-        var gkAdd = (gk0 && gk0.bonus) || 0;
+        var gkAdd = Math.floor(((gk0 && gk0.bonus) || 0) * adjRatio);
 
         if (masterRole !== 'lead' && (!p0.isSupport || !p0.isPassive)) return null;
         // 警護デッキに居る主将の一般武将副将は「警悟」（警護デッキセット時）スキルのみ有効
         if (masterRole === 'guard' && !p0.isGuard) return null;
         if (!isSameBaseAsAce && p0.mustBeSameBase) return null;
 
-        var gVal = (masterRole === 'lead') ? SharedDB.safeNum(p0.leadBuff, 0) : SharedDB.safeNum(p0.gMult, 0);
+        var rawGVal = (masterRole === 'lead') ? SharedDB.safeNum(p0.leadBuff, 0) : SharedDB.safeNum(p0.gMult, 0);
+        var gVal = rawGVal * adjRatio;
         if (gVal <= 0 && gkAdd <= 0) return null;
 
         var cleanSName = sName.replace(/^(?:攻防|攻|防|変|副攻|副防|副変):/, '').replace(/LV[0-9]+$/i, '');
+        var pctTag = Math.round(adjRatio * 100) + '%';
         var badge = (gkAdd > 0)
-            ? ('[副]' + cleanSName + ' 檄+' + gkAdd.toLocaleString())
-            : ('[副]' + cleanSName + ' 将+' + SharedDB.formatBuffNum(gVal) + '%');
+            ? ('[副' + pctTag + ']' + cleanSName + ' 檄+' + gkAdd.toLocaleString())
+            : ('[副' + pctTag + ']' + cleanSName + ' 将+' + SharedDB.formatBuffNum(gVal) + '%');
 
         return {
             card: gCard, uniqueId: gCard.uniqueId, cardNo: gCard.cardNo,
@@ -606,6 +638,12 @@ window.SoloEngine = (function() {
                     if (inf) {
                         var effRate = SharedDB.calcAdjutantEffectiveCopyRate(card, rawFk, inf);
                         curBuffAdd += baseCopyVal * (effRate / 100);
+                    } else if (Array.isArray(rawFk.skills) && rawFk.skills.length > 0) {
+                        var gCandCur = buildSoloGeneralAdjutantCand(rawFk, 'lead', 'SUN', true);
+                        if (gCandCur) {
+                            curBuffAdd += SharedDB.safeNum(gCandCur.genGMult, 0);
+                            curAtkAdd += SharedDB.safeNum(gCandCur.genRaw, 0);
+                        }
                     }
                 });
             }
@@ -1310,7 +1348,25 @@ window.SoloEngine = (function() {
                                         adjutantAddedBuffMap[mCard.uniqueId] += addB0;
                                     }
                                 } else {
-                                    existingList.push(rawFk);
+                                    // 一般武将が既存副将として付いている場合もレアリティ倍率（SL80/L70/UR60/SR50/R40）を適用
+                                    var gCandEx = buildSoloGeneralAdjutantCand(rawFk, master.role, leadBestWeather, master.isSameBaseAsAce);
+                                    if (gCandEx) {
+                                        var fkId2 = String(rawFk.uniqueId || rawFk.id || rawFk.cardNo || '');
+                                        var fkNo2 = String(rawFk.cardNo || fkId2);
+                                        if (fkId2) usedMirrorIds.add(fkId2);
+                                        if (fkNo2) usedMirrorNos.add(fkNo2);
+                                        existingList.push(Object.assign({}, rawFk, { label: gCandEx.label }));
+                                        if (gCandEx.genGMult > 0) {
+                                            additionalAdjutantBuff += gCandEx.genGMult;
+                                            adjutantAddedBuffMap[mCard.uniqueId] += gCandEx.genGMult;
+                                        }
+                                        if (gCandEx.genRaw > 0) {
+                                            totalGekireiBonus += gCandEx.genRaw;
+                                            adjutantAddedGekireiMap[mCard.uniqueId] += gCandEx.genRaw;
+                                        }
+                                    } else {
+                                        existingList.push(rawFk);
+                                    }
                                 }
                             });
                         }
