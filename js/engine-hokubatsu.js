@@ -1,6 +1,6 @@
 // ========================================================
-// 【北伐統合デッキ計算エンジン】js/engine-hokubatsu.js (Ver. 2.06)
-// 役割：北伐引率・単騎統合デッキ最適化、速度陣副将の速度/雷令スキル完全限定、一般副将レアリティ倍率、天候・号令対応
+// 【北伐統合デッキ計算エンジン】js/engine-hokubatsu.js (Ver. 2.07)
+// 役割：北伐引率・単騎統合デッキ最適化、既存副将2重加算バグ修正、速度陣副将速度限定、一般副将レアリティ倍率、天候・号令対応
 // ========================================================
 window.HokubatsuEngine = (function() {
     var isBuff10 = false;
@@ -338,6 +338,9 @@ window.HokubatsuEngine = (function() {
         if (skills.length === 0) return empty;
 
         var isHa = SharedDB.isHaBusho(card);
+        var hasFukushoArr = Array.isArray(card.fukusho) && card.fukusho.length > 0;
+        var shouldStripAdjSkills = Boolean(excludeSubSkills || hasFukushoArr);
+
         var s0 = skills[0];
         var p0 = parseHokuSkill(s0, targetTroopData, w);
         var gk0 = (!isDuelSkill(s0)) ? SharedDB.getGekireiBonus(s0, card.rarity, masterCost) : { bonus: 0, series: null };
@@ -363,7 +366,7 @@ window.HokubatsuEngine = (function() {
             if (isDuelSkill(sk)) continue;
 
             var isFromAdj = (sName.indexOf('副:') === 0 || sName.indexOf('副変:') === 0 || sName.indexOf('副攻:') === 0 || sName.indexOf('副防:') === 0 || sName.indexOf('副ﾃﾞｭｴﾙ:') === 0);
-            if (excludeSubSkills && !isHa && isFromAdj) continue;
+            if (shouldStripAdjSkills && !isHa && isFromAdj) continue;
 
             var isSelfMirror = !isFromAdj && (
                 sName.indexOf('変:') === 0 ||
@@ -428,11 +431,6 @@ window.HokubatsuEngine = (function() {
         };
     }
 
-    // =========================================================================
-    // 一般武将を副将にセットした時の第1スキル評価
-    // ※副将のスキル効果はレアリティに応じて SL:80% / L:70% / UR:60% / SR:50% / R:40% で発動
-    // ※速度陣に所属する主将の副将には、パッシブ速度上昇または雷令スキルを持つ武将のみ許可
-    // =========================================================================
     function buildGeneralAdjutantCandidateForMaster(gCard, entry, primaryTroop, weatherObj) {
         if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
         var skills = gCard.skills || [];
@@ -489,7 +487,6 @@ window.HokubatsuEngine = (function() {
         var cleanSName = sName.replace(/^(?:攻防|攻|防|変|副攻|副防|副変):/, '').replace(/LV[0-9]+$/i, '');
         var pctTag = Math.round(adjRatio * 100) + '%';
 
-        // 速度陣（単独または兼任）に入っている主将には、速度/雷令スキルを持たない一般副将を一切許可しない
         if (entry.bestRank === 4 || isInSpeedDeck) {
             if (isAttackOrSelfFirstSkill || !isPassiveFirst) return null;
             if (entry.inLead && entry.leadSlot && entry.leadSlot.role === 'SPEED') {
@@ -747,6 +744,7 @@ window.HokubatsuEngine = (function() {
         var priorityMasters = unifiedMasters.filter(function(e) { return e.bestRank <= 3; });
         var speedOnlyMasters = unifiedMasters.filter(function(e) { return e.bestRank === 4; });
 
+        // 【現在の副将のまま計算モード】主将の fukusho 配列から1回だけ加算（2重加算防止＆一般副将レアリティ倍率対応）
         if (!isReassignMode) {
             unifiedMasters.forEach(function(entry) {
                 var mCard = entry.card;
@@ -755,16 +753,41 @@ window.HokubatsuEngine = (function() {
                 mCard.fukusho.forEach(function(rawFk) {
                     var inf = SharedDB.getMirrorSkillInfo(rawFk);
                     var st = SharedDB.getAdjutantStatusEffect(rawFk, inf);
-                    var rate = inf ? SharedDB.calcAdjutantEffectiveCopyRate(mCard, rawFk, inf) : 0;
-                    var wrapped = Object.assign({}, rawFk, {
-                        copyRate: rate,
-                        label: inf ? formatMirrorLabelWithCost(inf, rate) : (rawFk.label || ''),
-                        atkBonus: st.atkBonus,
-                        spdBonus: st.spdBonus,
-                        info: inf
-                    });
-                    list.push(wrapped);
-                    applyAdjutantToEntry(entry, wrapped);
+                    if (inf) {
+                        var rate = SharedDB.calcAdjutantEffectiveCopyRate(mCard, rawFk, inf);
+                        var wrapped = Object.assign({}, rawFk, {
+                            copyRate: rate,
+                            label: formatMirrorLabelWithCost(inf, rate),
+                            atkBonus: st.atkBonus,
+                            spdBonus: st.spdBonus,
+                            info: inf
+                        });
+                        list.push(wrapped);
+                        applyAdjutantToEntry(entry, wrapped);
+                    } else {
+                        var gCandCur = buildGeneralAdjutantCandidateForMaster(rawFk, entry, primaryTroop, weatherObj);
+                        if (gCandCur) {
+                            var wrappedGen = Object.assign({}, rawFk, {
+                                copyRate: 0,
+                                label: gCandCur.label,
+                                atkBonus: st.atkBonus,
+                                spdBonus: st.spdBonus,
+                                isGeneralSkill: true,
+                                genStats: gCandCur.genStats
+                            });
+                            list.push(wrappedGen);
+                            applyAdjutantToEntry(entry, wrappedGen);
+                        } else {
+                            var wrappedPlain = Object.assign({}, rawFk, {
+                                copyRate: 0,
+                                label: rawFk.label || ((st.isBu ? '[武]' : st.isEi ? '[鋭]' : '') + '一般副将'),
+                                atkBonus: st.atkBonus,
+                                spdBonus: st.spdBonus
+                            });
+                            list.push(wrappedPlain);
+                            applyAdjutantToEntry(entry, wrappedPlain);
+                        }
+                    }
                 });
                 assignedMap[mCard.uniqueId] = list;
             });
@@ -903,7 +926,6 @@ window.HokubatsuEngine = (function() {
 
         var frontBackUsedCount = usedAdjutantUniqueIds.size;
 
-        // 【ステップ2】速度陣専用の副将アサイン（速度・雷令スキル効果に寄与する副将のみ許可）
         speedOnlyMasters.forEach(function(entry) {
             var mCard = entry.card;
             var maxFk = SharedDB.safeNum(mCard.maxFukushoCost, 0);
@@ -924,7 +946,6 @@ window.HokubatsuEngine = (function() {
             var firstSoloRr = ss ? (SharedDB.safeNum(ss.firstRairei, 0) / kMult) : 0;
             var hasCopyableSpeed = (firstLeadSpd > 0 || firstSoloSpd > 0 || firstSoloRr > 0);
 
-            // 主将の第1スキルが速度/雷令でない場合は、鏡カードでは速度が上がらないためミラー候補を空にする
             var unusedMirrors2 = hasCopyableSpeed ? availableMirrors.filter(function(fk) {
                 return !usedAdjutantUniqueIds.has(fk.uniqueId);
             }) : [];
@@ -955,7 +976,6 @@ window.HokubatsuEngine = (function() {
             });
 
             bestCombo2.forEach(function(chosenFk2) {
-                // 実際に速度または雷令が上昇する副将のみ採用
                 var addsSpeed = false;
                 if (chosenFk2.isGeneralSkill && chosenFk2.genStats) {
                     addsSpeed = (SharedDB.safeNum(chosenFk2.genStats.leadSpd, 0) > 0 ||
@@ -1040,7 +1060,7 @@ window.HokubatsuEngine = (function() {
             var uCards = AppCards.userCards;
             if (!uCards || uCards.length === 0) return;
             var wMeta = WEATHER_META[currentWeather] || WEATHER_META.SUN;
-            AppCards.setStatusLog("北伐統合デッキ最適化計算中... (" + uCards.length + "枚・天候[" + wMeta.label + "]・速度陣副将速度限定)");
+            AppCards.setStatusLog("北伐統合デッキ最適化計算中... (" + uCards.length + "枚・天候[" + wMeta.label + "]・副将分離評価)");
 
             var elTroop = document.getElementById('hokuLeadTroop');
             var elAdjMode = document.getElementById('hokuAdjutantMode');
@@ -1096,8 +1116,8 @@ window.HokubatsuEngine = (function() {
                     var estRatio = !hasAdjSlot ? 0 : (cRarity === 'SL' ? initSlCopyRatio : initLCopyRatio);
                     var kSelf = getKakuseiMult(c);
 
-                    var evAxe = evaluateCardHoku(c, axeTroop, 'SL', 4.5, isReassign, currentWeather);
-                    var evHam = evaluateCardHoku(c, hammerTroop, 'SL', 4.5, isReassign, currentWeather);
+                    var evAxe = evaluateCardHoku(c, axeTroop, 'SL', 4.5, true, currentWeather);
+                    var evHam = evaluateCardHoku(c, hammerTroop, 'SL', 4.5, true, currentWeather);
                     var evSel = (selectedTroopKey === 'HAMMER') ? evHam : evAxe;
 
                     if ((evAxe.isAttackLead || evHam.isAttackLead) && !evSel.isManualSupport && !evSel.isPassiveSupport) {
@@ -1247,7 +1267,7 @@ window.HokubatsuEngine = (function() {
                     var estRatioS = !hasAdjSlotS ? 0 : (sRarity === 'SL' ? initSlCopyRatio : initLCopyRatio);
                     var kSelfS = getKakuseiMult(sc);
 
-                    var evSolo = evaluateCardHoku(sc, null, sRarity, 4.5, isReassign, currentWeather);
+                    var evSolo = evaluateCardHoku(sc, null, sRarity, 4.5, true, currentWeather);
 
                     if (evSolo.isAttackLead && !evSolo.isManualSupport && !evSolo.isPassiveSupport) {
                         var baseAtk = SharedDB.safeNum(sc.baseAttack, 1000);
@@ -1565,6 +1585,7 @@ window.HokubatsuEngine = (function() {
                     var baseRr = (rr0 && rr0.addSpeed) || 0;
                     var cardRr = baseRr;
                     var isHa = SharedDB.isHaBusho(it.card);
+                    var hasFukushoArr = Array.isArray(it.card.fukusho) && it.card.fukusho.length > 0;
 
                     for (var k = 1; k < skills.length; k++) {
                         var sk = skills[k];
@@ -1573,7 +1594,7 @@ window.HokubatsuEngine = (function() {
                         if (sn.indexOf('覚:') === 0 || sn.indexOf('副覚:') === 0) continue;
                         if (isDuelSkill(sk)) continue;
                         var isAdj = (sn.indexOf('副:') === 0 || sn.indexOf('副変:') === 0 || sn.indexOf('副攻:') === 0 || sn.indexOf('副防:') === 0);
-                        if (isReassign && !isHa && isAdj) continue;
+                        if ((isReassign || hasFukushoArr) && !isHa && isAdj) continue;
 
                         var isMir = !isAdj && (sn.indexOf('変:') === 0 || sn.indexOf('主将の') !== -1 || sn.indexOf('明鑑') !== -1 || sn.indexOf('王春の') !== -1 || (sn.indexOf('明鏡') !== -1 && sn.indexOf('副将の') === -1));
                         var rri = HokubatsuDB.getRaireiSpeedBonus(sk, aceRarity);
@@ -1670,7 +1691,7 @@ window.HokubatsuEngine = (function() {
 
             currentHokuSetup = setup;
             render(setup);
-            AppCards.setStatusLog("北伐統合最適化完了（天候[" + wMeta.label + "]・速度陣副将速度/雷令完全限定）");
+            AppCards.setStatusLog("北伐統合最適化完了（Ver. 2.06 ／ 天候[" + wMeta.label + "]・副将分離評価済）");
         } catch (err) {
             console.error("HokubatsuEngine.run Error:", err);
             AppCards.setStatusLog("北伐計算エラー: " + err.message, true);
@@ -2046,7 +2067,7 @@ window.HokubatsuEngine = (function() {
         area.className = "space-y-6 animate-flash";
         area.innerHTML = `
             <div class="bg-purple-950/30 border border-purple-500/40 rounded-xl px-4 py-3 text-xs text-purple-200 flex flex-wrap items-center justify-between gap-2">
-                <span><i class="fa-solid fa-link text-purple-400 mr-1.5"></i><b>北伐統合エンジン (Ver. 2.05g)：</b>速度陣の副将も速度/雷令スキル完全限定・一般副将レアリティ倍率・天候判定完全対応を適用しています。</span>
+                <span><i class="fa-solid fa-link text-purple-400 mr-1.5"></i><b>北伐統合エンジン (Ver. 2.06)：</b>既存副将の分離評価（2重加算防止）・速度陣副将速度限定・一般副将レアリティ倍率・天候判定完全対応を適用しています。</span>
                 <span class="font-mono text-amber-300 font-bold">エース・前衛・後衛使用: ${setup.unifiedAdj.frontBackUsedCount}枚 ／ 速度陣への余り配置: ${setup.unifiedAdj.speedLeftoverUsedCount}枚</span>
             </div>
             ${envControlBarHTML}

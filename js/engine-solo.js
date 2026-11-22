@@ -1,6 +1,6 @@
 // ========================================================
-// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 2.06)
-// 役割：単騎攻撃・破壊10枠最適化、乗算ダメージ実測フィードバック型2パス反復2次元DP、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）＆警護「警悟」限定対応
+// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 2.07)
+// 役割：単騎攻撃・破壊10枠最適化、帝仙鏡(コスト1化)優先割当修正、乗算ダメージ実測フィードバック型2パス反復2次元DP、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）＆警護「警悟」限定対応
 // ========================================================
 window.SoloEngine = (function() {
     var isBuff10 = false;
@@ -34,6 +34,22 @@ window.SoloEngine = (function() {
     function getGeneralAdjutantRarityRatio(rarity) {
         var r = String(rarity || 'R').toUpperCase();
         return GENERAL_ADJUTANT_RARITY_RATES[r] !== undefined ? GENERAL_ADJUTANT_RARITY_RATES[r] : 0.40;
+    }
+
+    function isTeisenMirrorItem(m) {
+        if (!m) return false;
+        if (m.info && (m.info.type === 'senkyo' || m.info.type === 'teisen' || m.info.type === 'teisenkyo')) return true;
+        var nm = String((m.card && m.card.name) || m.name || '') + ' ' + String((m.info && m.info.label) || '');
+        return nm.indexOf('帝仙鏡') !== -1 || nm.indexOf('仙鏡') !== -1;
+    }
+
+    function cardHasEquippedTeisen(c) {
+        if (!c || !Array.isArray(c.fukusho)) return false;
+        return c.fukusho.some(function(fk) {
+            if (!fk) return false;
+            var t = String(fk.name || '') + ' ' + String(fk.label || '') + ' ' + String(fk.description || '');
+            return t.indexOf('帝仙鏡') !== -1 || t.indexOf('仙鏡') !== -1;
+        });
     }
 
     function formatMirrorLabelWithCost(inf, effRate) {
@@ -286,10 +302,6 @@ window.SoloEngine = (function() {
         return res;
     }
 
-    // =========================================================================
-    // 一般武将を副将にセットした時の第1スキル評価
-    // ※副将のスキル効果はレアリティに応じて SL:80% / L:70% / UR:60% / SR:50% / R:40% で発動
-    // =========================================================================
     function buildSoloGeneralAdjutantCand(gCard, masterRole, weatherObj, isSameBaseAsAce) {
         if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
         var skills = gCard.skills || [];
@@ -304,7 +316,6 @@ window.SoloEngine = (function() {
         var gkAdd = Math.floor(((gk0 && gk0.bonus) || 0) * adjRatio);
 
         if (masterRole !== 'lead' && (!p0.isSupport || !p0.isPassive)) return null;
-        // 警護デッキに居る主将の一般武将副将は「警悟」（警護デッキセット時）スキルのみ有効
         if (masterRole === 'guard' && !p0.isGuard) return null;
         if (!isSameBaseAsAce && p0.mustBeSameBase) return null;
 
@@ -676,7 +687,7 @@ window.SoloEngine = (function() {
         }
 
         var filteredPool = allMirrorPool.filter(function(fk) {
-            return !fixedUsedIds.has(fk.uniqueId) && !fixedUsedNos.has(fk.cardNo) && fk.uniqueId !== card.uniqueId && fk.cardNo !== card.cardNo;
+            return !fixedUsedIds.has(fk.uniqueId) && !fixedUsedNos.has(fk.cardNo) && fk.uniqueId !== card.uniqueId && fk.cardNo !== card.cardNo && !usedTeisenIds.has(fk.uniqueId);
         });
 
         var combo = SharedDB.findBestAdjutantCombo(card, filteredPool, fixedSlots, fixedCost, {
@@ -725,45 +736,133 @@ window.SoloEngine = (function() {
             var allMirrorPool = unifiedPools.mirrorPool;
             var allGeneralPool = unifiedPools.generalPool;
 
-            var effectiveCostMap = Object.create(null);
+            // 各カードのサポート性能（全天候最大値）と襲令専用フラグを事前計算
+            var supportProbeCache = Object.create(null);
             validCards.forEach(function(c) {
-                var baseC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
-                var hasEqTeisen = Array.isArray(c.fukusho) && c.fukusho.some(function(fk) {
-                    if (!fk) return false;
-                    var t = String(fk.name || '') + ' ' + String(fk.label || '') + ' ' + String(fk.description || '');
-                    return t.indexOf('帝仙鏡') !== -1 || t.indexOf('仙鏡') !== -1;
-                });
-                effectiveCostMap[c.uniqueId] = hasEqTeisen ? 1.0 : baseC;
+                supportProbeCache[c.uniqueId] = getBestWeatherForCard(c, 4.5);
             });
 
+            // 帝仙鏡（コスト1化）の事前割り当て
+            var effectiveCostMap = Object.create(null);
             var preTeisenAssignedMap = Object.create(null);
             var usedTeisenCardIds = new Set();
-            if (isReassignMode) {
-                var teisenFkCards = allMirrorPool.filter(function(m) { return m.info && m.info.type === 'senkyo'; });
-                var teisenCandidateList = validCards.filter(function(c) {
-                    var origC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
-                    if (SharedDB.isHaBusho(c) || String(c.rarity || '').toUpperCase() !== 'SL' || SharedDB.safeNum(c.maxFukushoCost, 0) <= 0 || origC <= 1.0) {
-                        return false;
+
+            validCards.forEach(function(c) {
+                var baseC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
+                effectiveCostMap[c.uniqueId] = baseC;
+            });
+
+            if (adjutantMode === 'CURRENT') {
+                validCards.forEach(function(c) {
+                    if (cardHasEquippedTeisen(c)) {
+                        effectiveCostMap[c.uniqueId] = 1.0;
                     }
-                    var evS = evaluateCard(c, 'SUN', 'support', 4.5);
-                    return evS.canBePassiveSlot || evS.canBeNaiseiSlot;
                 });
-                teisenCandidateList.sort(function(a, b) {
-                    var origA = SharedDB.safeNum(a.originalCost !== undefined ? a.originalCost : a.cost, 4.5);
-                    var origB = SharedDB.safeNum(b.originalCost !== undefined ? b.originalCost : b.cost, 4.5);
-                    var evA = evaluateCard(a, 'SUN', 'support', 4.5);
-                    var evB = evaluateCard(b, 'SUN', 'support', 4.5);
-                    var valA = Math.max(evA.gMult, evA.naiseiGMult);
-                    var valB = Math.max(evB.gMult, evB.naiseiGMult);
-                    return (origB - origA) || (valB - valA);
+            } else {
+                var allTeisenMirrors = allMirrorPool.filter(isTeisenMirrorItem);
+
+                // FILL_EMPTY モードでは既に帝仙鏡が付いているカードを優先維持
+                if (adjutantMode === 'FILL_EMPTY') {
+                    validCards.forEach(function(c) {
+                        if (cardHasEquippedTeisen(c)) {
+                            effectiveCostMap[c.uniqueId] = 1.0;
+                            if (Array.isArray(c.fukusho)) {
+                                c.fukusho.forEach(function(fk) {
+                                    if (fk && (String(fk.name || '') + String(fk.label || '')).indexOf('仙鏡') !== -1) {
+                                        if (fk.uniqueId) usedTeisenCardIds.add(String(fk.uniqueId));
+                                    }
+                                });
+                            }
+                        }
+                    });
+                }
+
+                var unequippedTeisen = allTeisenMirrors.filter(function(m) {
+                    return !usedTeisenCardIds.has(m.uniqueId);
                 });
 
-                for (var ti = 0; ti < Math.min(teisenFkCards.length, teisenCandidateList.length); ti++) {
-                    var tgtCard = teisenCandidateList[ti];
-                    var tFk = teisenFkCards[ti];
-                    preTeisenAssignedMap[tgtCard.uniqueId] = tFk;
-                    usedTeisenCardIds.add(tFk.uniqueId);
-                    effectiveCostMap[tgtCard.uniqueId] = 1.0;
+                if (unequippedTeisen.length > 0) {
+                    var minTeisenCost = unequippedTeisen.reduce(function(mn, m) {
+                        var tc = SharedDB.safeNum((m.card && m.card.cost) !== undefined ? m.card.cost : m.cost, 4.0);
+                        return Math.min(mn, tc);
+                    }, 4.0);
+
+                    // 襲令専用カードはデッキ全体で最大1枚しか使われないため、2番手以降の襲令ベンチカードに帝仙鏡を奪われないよう制限
+                    var shureiOnlyIds = new Set();
+                    var bestShureiId = null;
+                    var bestShureiVal = -1;
+                    validCards.forEach(function(c) {
+                        var sp = supportProbeCache[c.uniqueId];
+                        var pEv = sp && sp.eval;
+                        var nEv = sp && sp.naiseiEval;
+                        var isPassive = Boolean(pEv && pEv.canBePassiveSlot);
+                        var isNonShureiNaisei = Boolean(nEv && nEv.canBeNaiseiSlot && !nEv.isShurei);
+                        var isShureiOnly = Boolean(nEv && nEv.canBeNaiseiSlot && nEv.isShurei && !isPassive && !isNonShureiNaisei);
+                        if (isShureiOnly) {
+                            shureiOnlyIds.add(c.uniqueId);
+                            var sv = SharedDB.safeNum(nEv.naiseiGMult, 0);
+                            if (sv > bestShureiVal) {
+                                bestShureiVal = sv;
+                                bestShureiId = c.uniqueId;
+                            }
+                        }
+                    });
+
+                    var teisenCandidateList = validCards.filter(function(c) {
+                        if (effectiveCostMap[c.uniqueId] <= 1.0 + 1e-6) return false;
+                        var origC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
+                        var maxFk = SharedDB.safeNum(c.maxFukushoCost, 0);
+                        if (SharedDB.isHaBusho(c) || String(c.rarity || '').toUpperCase() !== 'SL' || origC <= 1.0 + 1e-6 || maxFk < minTeisenCost - 1e-6) {
+                            return false;
+                        }
+                        if (shureiOnlyIds.has(c.uniqueId) && c.uniqueId !== bestShureiId) {
+                            return false;
+                        }
+                        var sp = supportProbeCache[c.uniqueId];
+                        var pEv = sp && sp.eval;
+                        var nEv = sp && sp.naiseiEval;
+                        return Boolean((pEv && (pEv.canBePassiveSlot || pEv.canBeGuardSlot)) || (nEv && nEv.canBeNaiseiSlot));
+                    });
+
+                    teisenCandidateList.sort(function(a, b) {
+                        // 1. 元々帝仙鏡を装備していたカードを最優先
+                        var eqA = cardHasEquippedTeisen(a) ? 1 : 0;
+                        var eqB = cardHasEquippedTeisen(b) ? 1 : 0;
+                        if (eqB !== eqA) return eqB - eqA;
+
+                        // 2. 元コストが高い順（4.5コスト削減効果最大）
+                        var origA = SharedDB.safeNum(a.originalCost !== undefined ? a.originalCost : a.cost, 4.5);
+                        var origB = SharedDB.safeNum(b.originalCost !== undefined ? b.originalCost : b.cost, 4.5);
+                        if (Math.abs(origB - origA) > 1e-6) return origB - origA;
+
+                        // 3. サポートスキル威力順
+                        var spA = supportProbeCache[a.uniqueId];
+                        var spB = supportProbeCache[b.uniqueId];
+                        var valA = Math.max(SharedDB.safeNum(spA && spA.eval && spA.eval.gMult, 0), SharedDB.safeNum(spA && spA.naiseiEval && spA.naiseiEval.naiseiGMult, 0));
+                        var valB = Math.max(SharedDB.safeNum(spB && spB.eval && spB.eval.gMult, 0), SharedDB.safeNum(spB && spB.naiseiEval && spB.naiseiEval.naiseiGMult, 0));
+                        return valB - valA;
+                    });
+
+                    var assignIdx = 0;
+                    for (var ci = 0; ci < teisenCandidateList.length && assignIdx < unequippedTeisen.length; ci++) {
+                        var tgtCard = teisenCandidateList[ci];
+                        var maxFkC = SharedDB.safeNum(tgtCard.maxFukushoCost, 0);
+                        var tFk = null;
+                        for (var ti = assignIdx; ti < unequippedTeisen.length; ti++) {
+                            var candT = unequippedTeisen[ti];
+                            var tc = SharedDB.safeNum((candT.card && candT.card.cost) !== undefined ? candT.card.cost : candT.cost, 4.0);
+                            if (tc <= maxFkC + 1e-6) {
+                                tFk = candT;
+                                unequippedTeisen.splice(ti, 1);
+                                break;
+                            }
+                        }
+                        if (tFk) {
+                            preTeisenAssignedMap[tgtCard.uniqueId] = tFk;
+                            usedTeisenCardIds.add(tFk.uniqueId);
+                            effectiveCostMap[tgtCard.uniqueId] = 1.0;
+                        }
+                    }
                 }
             }
 
@@ -1272,7 +1371,6 @@ window.SoloEngine = (function() {
                             });
                         }
                     });
-                    // 警護デッキに居る主将は role: 'guard' とし、副将には「警悟」スキル持ちのみ許可
                     hGuardPicked.forEach(function(p) {
                         if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0) {
                             var firstS3 = (p.card.skills && p.card.skills[0]) || {};
@@ -1323,20 +1421,22 @@ window.SoloEngine = (function() {
                         if ((adjutantMode === 'CURRENT' || adjutantMode === 'FILL_EMPTY') && Array.isArray(mCard.fukusho)) {
                             mCard.fukusho.forEach(function(rawFk) {
                                 var inf = SharedDB.getMirrorSkillInfo(rawFk);
+                                var isTeisenFk = isTeisenMirrorItem({ card: rawFk, info: inf });
                                 var st = SharedDB.getAdjutantStatusEffect(rawFk, inf);
                                 var fkCost = SharedDB.safeNum(rawFk.cost, 0);
                                 usedAdjutantCostMap[mCard.uniqueId] += fkCost;
                                 if (master.role === 'lead') leadAdjutantAtkBonus += st.atkBonus;
 
-                                if (inf) {
-                                    var rate = SharedDB.calcAdjutantEffectiveCopyRate(mCard, rawFk, inf);
+                                if (inf || isTeisenFk) {
+                                    var rate = isTeisenFk ? 100 : SharedDB.calcAdjutantEffectiveCopyRate(mCard, rawFk, inf);
                                     var fkId = String(rawFk.uniqueId || rawFk.id || rawFk.cardNo || '');
                                     var fkNo = String(rawFk.cardNo || fkId);
                                     if (fkId) usedMirrorIds.add(fkId);
                                     if (fkNo) usedMirrorNos.add(fkNo);
+                                    var lbl = isTeisenFk ? ((st.isBu ? '[武]' : '') + '帝仙鏡 100% [主将C1化]') : formatMirrorLabelWithCost(inf, rate);
                                     existingList.push(Object.assign({}, rawFk, {
                                         copyRate: rate,
-                                        label: formatMirrorLabelWithCost(inf, rate)
+                                        label: lbl
                                     }));
                                     if (master.isGekirei && master.baseCopyRawAdd > 0) {
                                         var addGk0 = master.baseCopyRawAdd * (rate / 100);
@@ -1348,7 +1448,6 @@ window.SoloEngine = (function() {
                                         adjutantAddedBuffMap[mCard.uniqueId] += addB0;
                                     }
                                 } else {
-                                    // 一般武将が既存副将として付いている場合もレアリティ倍率（SL80/L70/UR60/SR50/R40）を適用
                                     var gCandEx = buildSoloGeneralAdjutantCand(rawFk, master.role, leadBestWeather, master.isSameBaseAsAce);
                                     if (gCandEx) {
                                         var fkId2 = String(rawFk.uniqueId || rawFk.id || rawFk.cardNo || '');
@@ -1540,7 +1639,7 @@ window.SoloEngine = (function() {
             }
             currentSetup = bestSetup;
             render(bestSetup);
-            AppCards.setStatusLog("単騎最適化完了 (" + SOLDIER_META[selectedSoldierFilter].short + "): 最大攻撃力 " + bestSetup.finalTotalDamage.toLocaleString());
+            AppCards.setStatusLog("単騎最適化完了 (Ver. 2.06 / " + SOLDIER_META[selectedSoldierFilter].short + "): 最大攻撃力 " + bestSetup.finalTotalDamage.toLocaleString());
         } catch (err) {
             console.error("SoloEngine.run Error:", err);
             AppCards.setStatusLog("単騎計算エラー: " + err.message, true);
@@ -1712,7 +1811,7 @@ window.SoloEngine = (function() {
                 <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 border-b border-gray-800 pb-4 gap-4">
                     <div>
                         <div class="flex flex-wrap items-center gap-1.5 mb-2">
-                            <span class="text-[10px] font-bold px-2 py-0.5 rounded shadow ${curMeta.badgeColor}">${curMeta.short}単騎</span>
+                            <span class="text-[10px] font-bold px-2 py-0.5 rounded shadow ${curMeta.badgeColor}">${curMeta.short}単騎 (Ver. 2.06)</span>
                             ${extraBadges}
                             <h3 class="text-lg font-bold text-white ml-1">【出撃拠点: <span class="${originColor}">${originName}</span>】</h3>
                         </div>

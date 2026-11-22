@@ -1,6 +1,6 @@
 // ========================================================
-// 【兵士防御計算エンジン】js/engine-def.js (Ver. 2.04)
-// 役割：拠点防衛・南蛮太守5枠最適化、2拠点同時DP最適配分（拠点縛り1枠厳密化）、警護デッキ副将の「警悟」スキル限定制限
+// 【兵士防御計算エンジン】js/engine-def.js (Ver. 2.07)
+// 役割：拠点防衛・南蛮太守5枠最適化、2拠点同時DP最適配分、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）、警護デッキ副将の「警悟」限定制限、既存副将2重加算防止＆天候判定完全対応
 // ========================================================
 window.DefEngine = (function() {
     var isDefBuff10 = false;
@@ -12,6 +12,38 @@ window.DefEngine = (function() {
     var currentDefSetup = null;
 
     var defSkillCache = Object.create(null);
+
+    // 一般武将を副将にセットした際のレアリティ別スキル発動倍率
+    var GENERAL_ADJUTANT_RARITY_RATES = {
+        'SL': 0.80,
+        'L':  0.70,
+        'UR': 0.60,
+        'SR': 0.50,
+        'R':  0.40,
+        'UC': 0.30,
+        'C':  0.20
+    };
+
+    function getGeneralAdjutantRarityRatio(rarity) {
+        var r = String(rarity || 'R').toUpperCase();
+        return GENERAL_ADJUTANT_RARITY_RATES[r] !== undefined ? GENERAL_ADJUTANT_RARITY_RATES[r] : 0.40;
+    }
+
+    function isTeisenMirrorItem(m) {
+        if (!m) return false;
+        if (m.info && (m.info.type === 'senkyo' || m.info.type === 'teisen' || m.info.type === 'teisenkyo')) return true;
+        var nm = String((m.card && m.card.name) || m.name || '') + ' ' + String((m.info && m.info.label) || '');
+        return nm.indexOf('帝仙鏡') !== -1 || nm.indexOf('仙鏡') !== -1;
+    }
+
+    function cardHasEquippedTeisen(c) {
+        if (!c || !Array.isArray(c.fukusho)) return false;
+        return c.fukusho.some(function(fk) {
+            if (!fk) return false;
+            var t = String(fk.name || '') + ' ' + String(fk.label || '') + ' ' + String(fk.description || '');
+            return t.indexOf('帝仙鏡') !== -1 || t.indexOf('仙鏡') !== -1;
+        });
+    }
 
     function formatMirrorLabelWithCost(inf, effRate) {
         if (!inf) return '';
@@ -59,6 +91,54 @@ window.DefEngine = (function() {
             }
         }
         return 1.0;
+    }
+
+    function calcWeatherMultSafe(rawDesc, weatherObj, targetStat) {
+        var cleaned = String(rawDesc || '')
+            .replace(/（/g, ' ')
+            .replace(/）/g, ' ')
+            .replace(/\(/g, ' ')
+            .replace(/\)/g, ' ');
+        var clauses = cleaned.split(
+            /[。\n\r]+|\s+(?=(?:晴天候|晴天|荒天|陰天|悪天候|雨天候|雨天|曇天候|曇天|雪天候|雪天|天候が|(?:[曇雨雪][、・\/／\s]+){1,2}[曇雨雪](?:天候|の時|時)|コスト|兵数|距離|武将|全武将|全兵))/
+        );
+        var isSun = (weatherObj === 'SUN');
+        var isBad = (weatherObj === 'CLOUD' || weatherObj === 'RAIN' || weatherObj === 'SNOW');
+        var bestMult = 1.0;
+
+        for (var i = 0; i < clauses.length; i++) {
+            var c = clauses[i].trim();
+            if (!c) continue;
+
+            if (!/([0-9\.]+)\s*倍/.test(c)) continue;
+
+            var matchedWeather = false;
+            if (isSun && /(?:晴天候|晴天|晴の時|天候が晴)/.test(c)) matchedWeather = true;
+            if (isBad && /(?:荒天|陰天|悪天候|(?:[曇雨雪][、・\/／\s]+){1,2}[曇雨雪])/.test(c)) matchedWeather = true;
+            if (weatherObj === 'RAIN' && /(?:雨天候|雨天|雨の時|天候が雨)/.test(c)) matchedWeather = true;
+            if (weatherObj === 'CLOUD' && /(?:曇天候|曇天|曇の時|天候が曇)/.test(c)) matchedWeather = true;
+            if (weatherObj === 'SNOW' && /(?:雪天候|雪天|雪の時|天候が雪)/.test(c)) matchedWeather = true;
+            if (!matchedWeather) continue;
+
+            var hasTarget = (c.indexOf(targetStat) !== -1) || (c.indexOf('効果') !== -1) || (c.indexOf('威力') !== -1);
+            var hasOtherStat = /(?:移動速度|移速|討伐ゲージ|経験値|資源|知力)/.test(c) ||
+                               (targetStat === '防御' && c.indexOf('攻撃') !== -1 && c.indexOf('防御') === -1) ||
+                               (targetStat === '攻撃' && c.indexOf('防御') !== -1 && c.indexOf('攻撃') === -1);
+            if (hasOtherStat && !hasTarget) continue;
+
+            var reSpecific = new RegExp('(?:効果|威力|' + targetStat + '(?:力)?)[がはのを]?\\s*([0-9\\.]+)\\s*倍');
+            var mMult = c.match(reSpecific);
+            if (!mMult) {
+                mMult = c.match(/(?:晴天候|晴天|荒天|陰天|悪天候|雨天候|雨天|曇天候|曇天|雪天候|雪天|(?:[曇雨雪][、・\/／\s]+){1,2}[曇雨雪])(?:天候)?[はの時に]?\s*([0-9\.]+)\s*倍/);
+            }
+            if (mMult) {
+                var val = parseFloat(mMult[1]);
+                if (!isNaN(val) && val > 1.0) {
+                    bestMult = Math.max(bestMult, val);
+                }
+            }
+        }
+        return bestMult;
     }
 
     function floatVal(s) {
@@ -117,14 +197,7 @@ window.DefEngine = (function() {
             res.isManualNaisei = true;
         }
 
-        var wMult = 1.0;
-        var cleanedWeatherDesc = full.replace(/[（\(][^）\)]*?[）\)]/g, ' ');
-        var mSun = cleanedWeatherDesc.match(/晴天候時(?:は|の時)?[^0-9。]*?([0-9\.]+)倍/);
-        if (mSun && weatherObj === 'SUN') wMult = Math.max(wMult, parseFloat(mSun[1]));
-        var mBad = cleanedWeatherDesc.match(/(?:荒天時|曇[、・\s]*雨[、・\s]*雪天候時)(?:は|の時)?[^0-9。]*?([0-9\.]+)倍/);
-        if (mBad && (weatherObj === 'CLOUD' || weatherObj === 'RAIN' || weatherObj === 'SNOW')) {
-            wMult = Math.max(wMult, parseFloat(mBad[1]));
-        }
+        var wMult = calcWeatherMultSafe(normDesc, weatherObj, '防御');
 
         var mSameC = normDesc.match(/同一勢力\((魏|呉|蜀|他)\)の武将1枚につき([0-9\.]+)[%％]/);
         if (mSameC) {
@@ -177,12 +250,32 @@ window.DefEngine = (function() {
             }
         }
 
+        var mExtra = normDesc.match(/更に(?:(?:攻撃(?:力)?[と・、,\/])?防御(?:力)?(?:[と・、,\/](?:攻撃(?:力)?|移動速度|移速))*\s*[がをのは]?)?\s*([0-9\.]+)[%％]/);
+        if (mExtra) {
+            var extraV = floatVal(mExtra[1]);
+            var okWeather = true;
+            if ((normDesc.indexOf('晴天候') !== -1 || normDesc.indexOf('晴天') !== -1) && weatherObj !== 'SUN') okWeather = false;
+            if ((normDesc.indexOf('曇') !== -1 || normDesc.indexOf('雨') !== -1 || normDesc.indexOf('雪') !== -1 || normDesc.indexOf('荒天') !== -1 || normDesc.indexOf('陰天') !== -1 || normDesc.indexOf('悪天候') !== -1) && ['CLOUD', 'RAIN', 'SNOW'].indexOf(weatherObj) === -1) okWeather = false;
+            if (okWeather) {
+                if (tDefCondition(tMult)) tMult += extraV;
+                if (tDefCondition(gMult)) gMult += extraV;
+            }
+        }
+
         res.tMult = tMult * wMult;
         res.gMult = gMult * wMult;
         defSkillCache[cacheKey] = res;
         return res;
     }
 
+    function tDefCondition(v) {
+        return v > 0;
+    }
+
+    // =========================================================================
+    // 一般武将を副将にセットした時の第1スキル評価
+    // ※副将のスキル効果はレアリティに応じて SL:80% / L:70% / UR:60% / SR:50% / R:40% で発動
+    // =========================================================================
     function buildDefGeneralAdjutantCand(gCard, targetTroopData, weatherObj, isExactDefendedBaseSlot, isGuardMaster) {
         if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
         var skills = gCard.skills || [];
@@ -193,6 +286,7 @@ window.DefEngine = (function() {
 
         if (sName.indexOf('攻:') === 0 || sName.indexOf('副攻:') === 0) return null;
 
+        var adjRatio = getGeneralAdjutantRarityRatio(gCard.rarity);
         var p0 = parseDefSkill(s0, targetTroopData, weatherObj);
         if (!p0.isDefSkill || !p0.isPassive || p0.tMult <= 0) return null;
         // 警護デッキに居る主将の一般武将副将は「警悟」（警護デッキセット時）スキルのみ有効
@@ -200,11 +294,13 @@ window.DefEngine = (function() {
 
         if (!isExactDefendedBaseSlot && p0.mustBeSameBase) return null;
 
-        var tVal = SharedDB.safeNum(p0.tMult, 0);
-        var gVal = SharedDB.safeNum(p0.gMult, 0);
+        var tVal = SharedDB.safeNum(p0.tMult, 0) * adjRatio;
+        var gVal = SharedDB.safeNum(p0.gMult, 0) * adjRatio;
+        if (tVal <= 0) return null;
 
         var cleanSName = sName.replace(/^(?:攻防|攻|防|変|副攻|副防|副変):/, '').replace(/LV[0-9]+$/i, '');
-        var badge = '[副]' + cleanSName + ' 防+' + SharedDB.formatBuffNum(tVal) + '%';
+        var pctTag = Math.round(adjRatio * 100) + '%';
+        var badge = '[副' + pctTag + ']' + cleanSName + ' 防+' + SharedDB.formatBuffNum(tVal) + '%';
 
         return {
             card: gCard,
@@ -237,6 +333,8 @@ window.DefEngine = (function() {
         var isGuardCard = p0.isGuardDeck;
         var mustBeSameBaseCard = false;
         var isHa = SharedDB.isHaBusho(card);
+        var hasFukushoArr = Array.isArray(card.fukusho) && card.fukusho.length > 0;
+        var shouldStripAdjSkills = Boolean(excludeSubSkills || hasFukushoArr);
         var kMultSelf = getDefKakuseiMult(card);
 
         for (var idx = 0; idx < skills.length; idx++) {
@@ -248,7 +346,7 @@ window.DefEngine = (function() {
             if (isDuelSkill(s)) continue;
 
             var isFromAdj = (sName.indexOf('副:') === 0 || sName.indexOf('副変:') === 0 || sName.indexOf('副攻:') === 0 || sName.indexOf('副防:') === 0 || sName.indexOf('副ﾃﾞｭｴﾙ:') === 0);
-            if (excludeSubSkills && !isHa && isFromAdj) continue;
+            if (shouldStripAdjSkills && !isHa && isFromAdj) continue;
 
             var parsed = parseDefSkill(s, targetTroopData, weatherObj);
 
@@ -489,42 +587,122 @@ window.DefEngine = (function() {
             var allMirrorPool = unifiedPools.mirrorPool;
             var allGeneralPool = unifiedPools.generalPool;
 
-            var effectiveCostMap = Object.create(null);
+            // サポート評価プローブ事前計算
+            var defProbeCache = Object.create(null);
             validCards.forEach(function(c) {
-                var baseC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
-                var hasEqTeisen = Array.isArray(c.fukusho) && c.fukusho.some(function(fk) {
-                    if (!fk) return false;
-                    var t = String(fk.name || '') + ' ' + String(fk.label || '') + ' ' + String(fk.description || '');
-                    return t.indexOf('帝仙鏡') !== -1 || t.indexOf('仙鏡') !== -1;
-                });
-                effectiveCostMap[c.uniqueId] = hasEqTeisen ? 1.0 : baseC;
+                defProbeCache[c.uniqueId] = getBestWeatherForCardDef(c, targetTroopData, true);
             });
 
+            // 帝仙鏡（コスト1化）の事前割り当て
+            var effectiveCostMap = Object.create(null);
             var preTeisenAssignedMap = Object.create(null);
             var usedTeisenCardIds = new Set();
-            if (isReassignMode) {
-                var teisenFkCards = allMirrorPool.filter(function(m) { return m.info && m.info.type === 'senkyo'; });
-                if (teisenFkCards.length > 0) {
-                    var teisenCandidateList = validCards.filter(function(c) {
-                        var origC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
-                        return !SharedDB.isHaBusho(c) &&
-                            String(c.rarity || '').toUpperCase() === 'SL' &&
-                            SharedDB.safeNum(c.maxFukushoCost, 0) > 0 &&
-                            origC > 1.0 &&
-                            evaluateCardDef(c, targetTroopData, 'SUN', true).tMult > 0;
+
+            validCards.forEach(function(c) {
+                var baseC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
+                effectiveCostMap[c.uniqueId] = baseC;
+            });
+
+            if (defAdjutantMode === 'CURRENT') {
+                validCards.forEach(function(c) {
+                    if (cardHasEquippedTeisen(c)) {
+                        effectiveCostMap[c.uniqueId] = 1.0;
+                    }
+                });
+            } else {
+                var allTeisenMirrors = allMirrorPool.filter(isTeisenMirrorItem);
+
+                if (defAdjutantMode === 'FILL_EMPTY') {
+                    validCards.forEach(function(c) {
+                        if (cardHasEquippedTeisen(c)) {
+                            effectiveCostMap[c.uniqueId] = 1.0;
+                            if (Array.isArray(c.fukusho)) {
+                                c.fukusho.forEach(function(fk) {
+                                    if (fk && (String(fk.name || '') + String(fk.label || '')).indexOf('仙鏡') !== -1) {
+                                        if (fk.uniqueId) usedTeisenCardIds.add(String(fk.uniqueId));
+                                    }
+                                });
+                            }
+                        }
                     });
+                }
+
+                var unequippedTeisen = allTeisenMirrors.filter(function(m) {
+                    return !usedTeisenCardIds.has(m.uniqueId);
+                });
+
+                if (unequippedTeisen.length > 0) {
+                    var minTeisenCost = unequippedTeisen.reduce(function(mn, m) {
+                        var tc = SharedDB.safeNum((m.card && m.card.cost) !== undefined ? m.card.cost : m.cost, 4.0);
+                        return Math.min(mn, tc);
+                    }, 4.0);
+
+                    // 拠点縛り内政官は防衛対象拠点の1枠しか使われないため、2番手以降に帝仙鏡を奪われないよう制限
+                    var boundNaiseiOnlyIds = new Set();
+                    var bestBoundNaiseiId = null;
+                    var bestBoundNaiseiVal = -1;
+                    validCards.forEach(function(c) {
+                        var dp = defProbeCache[c.uniqueId];
+                        var ev = dp && dp.eval;
+                        if (ev && ev.isManualNaisei && ev.mustBeSameBase) {
+                            boundNaiseiOnlyIds.add(c.uniqueId);
+                            var bv = SharedDB.safeNum(ev.tMult, 0);
+                            if (bv > bestBoundNaiseiVal) {
+                                bestBoundNaiseiVal = bv;
+                                bestBoundNaiseiId = c.uniqueId;
+                            }
+                        }
+                    });
+
+                    var teisenCandidateList = validCards.filter(function(c) {
+                        if (effectiveCostMap[c.uniqueId] <= 1.0 + 1e-6) return false;
+                        var origC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
+                        var maxFk = SharedDB.safeNum(c.maxFukushoCost, 0);
+                        if (SharedDB.isHaBusho(c) || String(c.rarity || '').toUpperCase() !== 'SL' || origC <= 1.0 + 1e-6 || maxFk < minTeisenCost - 1e-6) {
+                            return false;
+                        }
+                        if (boundNaiseiOnlyIds.has(c.uniqueId) && c.uniqueId !== bestBoundNaiseiId) {
+                            return false;
+                        }
+                        var dp = defProbeCache[c.uniqueId];
+                        var ev = dp && dp.eval;
+                        return Boolean(ev && (ev.tMult > 0 || ev.perSameCountryMult > 0 || ev.dmgReduce > 0));
+                    });
+
                     teisenCandidateList.sort(function(a, b) {
+                        var eqA = cardHasEquippedTeisen(a) ? 1 : 0;
+                        var eqB = cardHasEquippedTeisen(b) ? 1 : 0;
+                        if (eqB !== eqA) return eqB - eqA;
+
                         var origA = SharedDB.safeNum(a.originalCost !== undefined ? a.originalCost : a.cost, 4.5);
                         var origB = SharedDB.safeNum(b.originalCost !== undefined ? b.originalCost : b.cost, 4.5);
-                        if (origB !== origA) return origB - origA;
-                        return evaluateCardDef(b, targetTroopData, 'SUN', true).tMult - evaluateCardDef(a, targetTroopData, 'SUN', true).tMult;
+                        if (Math.abs(origB - origA) > 1e-6) return origB - origA;
+
+                        var evA = defProbeCache[a.uniqueId] && defProbeCache[a.uniqueId].eval;
+                        var evB = defProbeCache[b.uniqueId] && defProbeCache[b.uniqueId].eval;
+                        var vA = SharedDB.safeNum(evA && evA.tMult, 0);
+                        var vB = SharedDB.safeNum(evB && evB.tMult, 0);
+                        return vB - vA;
                     });
-                    for (var ti = 0; ti < Math.min(teisenFkCards.length, teisenCandidateList.length); ti++) {
-                        var tgtCard = teisenCandidateList[ti];
-                        var tFk = teisenFkCards[ti];
-                        preTeisenAssignedMap[tgtCard.uniqueId] = tFk;
-                        usedTeisenCardIds.add(tFk.uniqueId);
-                        effectiveCostMap[tgtCard.uniqueId] = 1.0;
+
+                    for (var ci = 0; ci < teisenCandidateList.length && unequippedTeisen.length > 0; ci++) {
+                        var tgtCard = teisenCandidateList[ci];
+                        var maxFkC = SharedDB.safeNum(tgtCard.maxFukushoCost, 0);
+                        var tFk = null;
+                        for (var ti = 0; ti < unequippedTeisen.length; ti++) {
+                            var candT = unequippedTeisen[ti];
+                            var tc = SharedDB.safeNum((candT.card && candT.card.cost) !== undefined ? candT.card.cost : candT.cost, 4.0);
+                            if (tc <= maxFkC + 1e-6) {
+                                tFk = candT;
+                                unequippedTeisen.splice(ti, 1);
+                                break;
+                            }
+                        }
+                        if (tFk) {
+                            preTeisenAssignedMap[tgtCard.uniqueId] = tFk;
+                            usedTeisenCardIds.add(tFk.uniqueId);
+                            effectiveCostMap[tgtCard.uniqueId] = 1.0;
+                        }
                     }
                 }
             }
@@ -537,7 +715,7 @@ window.DefEngine = (function() {
             for (var i = 0; i < validCards.length; i++) {
                 var c = validCards[i];
                 if (usedTeisenCardIds.has(c.uniqueId)) continue;
-                var bestEv = getBestWeatherForCardDef(c, targetTroopData, isReassignMode);
+                var bestEv = defProbeCache[c.uniqueId] || getBestWeatherForCardDef(c, targetTroopData, true);
                 var ev = bestEv.eval;
                 if (!ev || (ev.tMult <= 0 && ev.perSameCountryMult <= 0 && ev.dmgReduce <= 0)) continue;
 
@@ -709,7 +887,7 @@ window.DefEngine = (function() {
             Object.keys(activeSlots).forEach(function(sId) {
                 var it = activeSlots[sId];
                 var curW = shouldAutoWeather ? it.weather : (AppCards.slotWeathers[sId] || it.weather || 'SUN');
-                var reEv = evaluateCardDef(it.card, targetTroopData, curW, isReassignMode);
+                var reEv = evaluateCardDef(it.card, targetTroopData, curW, true);
                 it.rawTMult = reEv.tMult;
                 it.rawGMult = reEv.gMult;
                 it.firstTMult = reEv.firstTMult;
@@ -775,20 +953,22 @@ window.DefEngine = (function() {
                 if ((defAdjutantMode === 'CURRENT' || defAdjutantMode === 'FILL_EMPTY') && Array.isArray(mCard.fukusho)) {
                     mCard.fukusho.forEach(function(rawFk) {
                         var inf = SharedDB.getMirrorSkillInfo(rawFk);
+                        var isTeisenFk = isTeisenMirrorItem({ card: rawFk, info: inf });
                         var st = SharedDB.getAdjutantStatusEffect(rawFk, inf);
                         var fkCost = SharedDB.safeNum(rawFk.cost, 0);
                         usedAdjutantCostMap[mCard.uniqueId] += fkCost;
                         totalDefenderAdjDefBonus += st.defBonus;
 
-                        if (inf) {
-                            var rate = SharedDB.calcAdjutantEffectiveCopyRate(mCard, rawFk, inf);
+                        if (inf || isTeisenFk) {
+                            var rate = isTeisenFk ? 100 : SharedDB.calcAdjutantEffectiveCopyRate(mCard, rawFk, inf);
                             var fkId = String(rawFk.uniqueId || rawFk.id || rawFk.cardNo || '');
                             var fkNo = String(rawFk.cardNo || fkId);
                             if (fkId) usedMirrorIds.add(fkId);
                             if (fkNo) usedMirrorNos.add(fkNo);
+                            var lbl = isTeisenFk ? ((st.isGo ? '[護]' : st.isBu ? '[武]' : '') + '帝仙鏡 100% [主将C1化]') : formatMirrorLabelWithCost(inf, rate);
                             existing.push(Object.assign({}, rawFk, {
                                 copyRate: rate,
-                                label: formatMirrorLabelWithCost(inf, rate)
+                                label: lbl
                             }));
                             var addT = master.baseCopyTVal * (rate / 100);
                             var addG = master.baseCopyGVal * (rate / 100);
@@ -797,7 +977,21 @@ window.DefEngine = (function() {
                             adjutantAddedTroopBuffMap[mCard.uniqueId] += addT;
                             adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
                         } else {
-                            existing.push(rawFk);
+                            // 一般武将が既存副将として付いている場合もレアリティ倍率（SL80/L70/UR60/SR50/R40）を適用
+                            var gCandEx = buildDefGeneralAdjutantCand(rawFk, targetTroopData, 'SUN', master.isExactDefendedBaseSlot, master.isGuardMaster);
+                            if (gCandEx) {
+                                var fkId2 = String(rawFk.uniqueId || rawFk.id || rawFk.cardNo || '');
+                                var fkNo2 = String(rawFk.cardNo || fkId2);
+                                if (fkId2) usedMirrorIds.add(fkId2);
+                                if (fkNo2) usedMirrorNos.add(fkNo2);
+                                existing.push(Object.assign({}, rawFk, { label: gCandEx.label }));
+                                additionalAdjutantTroopBuff += gCandEx.genTMult;
+                                additionalAdjutantGenBuff += gCandEx.genGMult;
+                                adjutantAddedTroopBuffMap[mCard.uniqueId] += gCandEx.genTMult;
+                                adjutantAddedGenBuffMap[mCard.uniqueId] += gCandEx.genGMult;
+                            } else {
+                                existing.push(rawFk);
+                            }
                         }
                     });
                 }
@@ -987,7 +1181,7 @@ window.DefEngine = (function() {
             currentDefSetup = setup;
             render(setup);
             var modeTag = isNanbanMode ? ("南蛮モード・太守" + pickedNanbanTaishu.length + "枠 / 節約" + nanbanSavedCost.toFixed(1) + "C") : "通常防衛モード";
-            AppCards.setStatusLog("兵士防御最適化完了 (" + modeTag + "): 総合防御力 " + finalTotalDefense.toLocaleString());
+            AppCards.setStatusLog("兵士防御最適化完了 (Ver. 2.06 / " + modeTag + "): 総合防御力 " + finalTotalDefense.toLocaleString());
         } catch (err) {
             console.error("DefEngine.run Error:", err);
             AppCards.setStatusLog("兵士防御計算エラー: " + err.message, true);
@@ -1187,7 +1381,7 @@ window.DefEngine = (function() {
                 <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 border-b border-gray-800 pb-4 gap-4">
                     <div>
                         <div class="flex flex-wrap items-center gap-1.5 mb-2">
-                            <span class="bg-sky-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">兵士防御計算結果</span>
+                            <span class="bg-sky-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">兵士防御計算結果 (Ver. 2.06)</span>
                             <span class="bg-gray-800 border border-gray-600 text-amber-300 text-[10px] font-bold px-2 py-0.5 rounded">有効内政枠: 本拠${setup.maxHonkyoNaisei} + 拠点${setup.maxKyotenNaisei}</span>
                             ${extraBadges}
                             <h3 class="text-lg font-bold text-white ml-1">【防衛拠点: <span class="${baseColor}">${baseLabel}</span>】</h3>
