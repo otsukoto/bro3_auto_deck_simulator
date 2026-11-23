@@ -1,6 +1,6 @@
 // ========================================================
-// 【アプリ統合・カード管理】js/app-cards.js (Ver. 2.00)
-// 役割：全カードJSON読込・フィルタ・除外設定、スロット別天候管理、単騎・引率・兵士防御の各計算エンジン制御
+// 【アプリ統合・カード管理】js/shared-cards.js (Ver. 2.08)
+// 役割：全カードJSON読込・フィルタ・除外設定、超覇レベル(supremacyLevel)保持、スロット別天候管理、単騎・引率・兵士防御の各計算エンジン制御
 // ========================================================
 window.AppCards = (function() {
     var state = {
@@ -141,6 +141,21 @@ window.AppCards = (function() {
         return result;
     }
 
+    function checkFkHasTeisen(fk) {
+        if (!fk || typeof fk !== 'object') return false;
+        var t = String(fk.name || '') + ' ' + String(fk.label || '') + ' ' + String(fk.description || '');
+        if (t.indexOf('帝仙鏡') !== -1 || t.indexOf('仙鏡') !== -1 || t.indexOf('コストが1') !== -1 || t.indexOf('コストを1') !== -1) return true;
+        if (Array.isArray(fk.skills)) {
+            for (var i = 0; i < fk.skills.length; i++) {
+                var sk = fk.skills[i];
+                if (!sk) continue;
+                var st = String(sk.name || '') + ' ' + String(sk.description || '');
+                if (st.indexOf('帝仙鏡') !== -1 || st.indexOf('仙鏡') !== -1 || st.indexOf('コストが1') !== -1 || st.indexOf('コストを1') !== -1) return true;
+            }
+        }
+        return false;
+    }
+
     function extractTroopDefenses(c, fallbackDef) {
         var defObj = (c && typeof c.defense === 'object' && c.defense !== null) ? c.defense :
                      (c && typeof c.defenses === 'object' && c.defenses !== null) ? c.defenses : {};
@@ -172,7 +187,7 @@ window.AppCards = (function() {
     function resolveCountry(c) {
         var name = String((c && (c.name || c.card_name)) || '').trim();
         var rarity = String((c && (c.rarity || c.rare)) || '').trim();
-        if (c && c.isHa || name.indexOf('×') !== -1 || rarity.indexOf('覇') !== -1 || name.indexOf('覇') !== -1) return '覇';
+        if (c && (c.isHa || SharedDB.safeNum(c.supremacyLevel, 0) > 0) || name.indexOf('×') !== -1 || rarity.indexOf('覇') !== -1 || name.indexOf('覇') !== -1) return '覇';
         var raw = String((c && (c.country || c.force || c.faction || c.seiryoku || c.group)) || '').trim();
         if (raw.indexOf('改') !== -1) return '改';
         if (raw.indexOf('魏') !== -1) return '魏';
@@ -233,16 +248,13 @@ window.AppCards = (function() {
             var rawRarity = String((c && (c.rarity || c.rare || c.rank)) || 'C').trim().toUpperCase();
             var name = String((c && (c.name || c.card_name || c.busho_name)) || '不明').trim();
             var country = resolveCountry(c);
-            var isHa = SharedDB.isHaBusho(c) || (country === '覇');
+            var supremacyLv = Math.max(0, Math.min(5, Math.floor(SharedDB.safeNum(c && (c.supremacyLevel !== undefined ? c.supremacyLevel : (c.supremacy_level !== undefined ? c.supremacy_level : c.chouha)), 0))));
+            var isHa = SharedDB.isHaBusho(c) || (country === '覇') || (supremacyLv > 0);
             var rawNo = String((c && (c.cardNo || c.card_no || c.no || c.cardno || c.cardId || c.card_id || c.id)) || idx).trim();
 
             var skills = extractSkills(c);
             var fukushoArr = extractFukusho(c, isHa);
-            var hasEquippedTeisen = fukushoArr.some(function(fk) {
-                if (!fk) return false;
-                var t = String(fk.name || '') + ' ' + String(fk.label || '') + ' ' + String(fk.description || '');
-                return t.indexOf('帝仙鏡') !== -1 || t.indexOf('仙鏡') !== -1;
-            });
+            var hasEquippedTeisen = fukushoArr.some(checkFkHasTeisen);
 
             var baseCost = SharedDB.safeNum(c && (c.cost || c.card_cost || c.c), 4.5);
             var finalCost = hasEquippedTeisen ? 1.0 : baseCost;
@@ -291,6 +303,7 @@ window.AppCards = (function() {
                 score: scoreVal,
                 intelligence: SharedDB.safeNum(c && c.intelligence, 50), originalCost: baseCost, cost: finalCost,
                 hasTeisenkyo: hasEquippedTeisen, level: parseInt(c.level || 0) || 0,
+                supremacyLevel: supremacyLv,
                 soldierType: soldierInfo.raw,
                 soldierKey: soldierInfo.key,
                 soldierLabel: soldierInfo.label,

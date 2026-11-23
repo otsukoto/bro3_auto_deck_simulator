@@ -1,6 +1,6 @@
 // ========================================================
-// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 2.07)
-// 役割：単騎攻撃・破壊10枠最適化、帝仙鏡(コスト1化)優先割当修正、乗算ダメージ実測フィードバック型2パス反復2次元DP、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）＆警護「警悟」限定対応
+// 【単騎火力計算エンジン】js/engine-solo.js (Ver. 2.08)
+// 役割：単騎攻撃・破壊10枠最適化、主将コピースキル(skills[0]基準・檄令非覚醒除算修正)、龍神/亀神/獣神/鬼神/天帝檄令＆覇超覇(supremacyLevel)補正対応、課金10%・号令切替時の不要なデッキ組み換え防止（fastUpdateSoloMultiplier導入）、内政・サポートスキル(防:/変:)の単騎誤除外バグ修正＆攻撃バフ抽出強化、「現在の副将のまま計算」時の帝仙鏡(コスト1化)＆既存副将バフ・檄令事前反映、2パス反復2次元DP、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）＆警護「警悟」限定対応
 // ========================================================
 window.SoloEngine = (function() {
     var isBuff10 = false;
@@ -36,20 +36,59 @@ window.SoloEngine = (function() {
         return GENERAL_ADJUTANT_RARITY_RATES[r] !== undefined ? GENERAL_ADJUTANT_RARITY_RATES[r] : 0.40;
     }
 
+    function hasTeisenKeywordInText(txt) {
+        if (!txt) return false;
+        return txt.indexOf('帝仙鏡') !== -1 ||
+               txt.indexOf('仙鏡') !== -1 ||
+               txt.indexOf('コストが1') !== -1 ||
+               txt.indexOf('コストを1') !== -1;
+    }
+
+    function isTeisenAdjutantObject(fk) {
+        if (!fk || typeof fk !== 'object') return false;
+        var inf = SharedDB.getMirrorSkillInfo ? SharedDB.getMirrorSkillInfo(fk) : null;
+        if (inf && (inf.type === 'senkyo' || inf.type === 'teisen' || inf.type === 'teisenkyo')) return true;
+        var topTxt = String(fk.name || '') + ' ' + String(fk.label || '') + ' ' + String(fk.description || '') + ' ' + (inf ? String(inf.label || '') : '');
+        if (hasTeisenKeywordInText(topTxt)) return true;
+        if (Array.isArray(fk.skills)) {
+            for (var i = 0; i < fk.skills.length; i++) {
+                var sk = fk.skills[i];
+                if (!sk) continue;
+                var skTxt = String(sk.name || '') + ' ' + String(sk.description || '');
+                if (hasTeisenKeywordInText(skTxt)) return true;
+            }
+        }
+        return false;
+    }
+
     function isTeisenMirrorItem(m) {
         if (!m) return false;
         if (m.info && (m.info.type === 'senkyo' || m.info.type === 'teisen' || m.info.type === 'teisenkyo')) return true;
-        var nm = String((m.card && m.card.name) || m.name || '') + ' ' + String((m.info && m.info.label) || '');
-        return nm.indexOf('帝仙鏡') !== -1 || nm.indexOf('仙鏡') !== -1;
+        if (m.card && isTeisenAdjutantObject(m.card)) return true;
+        return isTeisenAdjutantObject(m);
     }
 
     function cardHasEquippedTeisen(c) {
-        if (!c || !Array.isArray(c.fukusho)) return false;
-        return c.fukusho.some(function(fk) {
-            if (!fk) return false;
-            var t = String(fk.name || '') + ' ' + String(fk.label || '') + ' ' + String(fk.description || '');
-            return t.indexOf('帝仙鏡') !== -1 || t.indexOf('仙鏡') !== -1;
-        });
+        if (!c) return false;
+        if (c.hasTeisenkyo) return true;
+        if (c.originalCost !== undefined && SharedDB.safeNum(c.originalCost, 0) > 1.0 + 1e-6 && SharedDB.safeNum(c.cost, 4.5) <= 1.0 + 1e-6) {
+            return true;
+        }
+        if (Array.isArray(c.fukusho) && c.fukusho.some(isTeisenAdjutantObject)) {
+            return true;
+        }
+        if (Array.isArray(c.skills)) {
+            for (var i = 0; i < c.skills.length; i++) {
+                var sk = c.skills[i];
+                if (!sk) continue;
+                var sn = String(sk.name || '');
+                var sd = String(sk.description || '');
+                if ((sn.indexOf('副') === 0 || sn.indexOf('仙鏡') !== -1) && hasTeisenKeywordInText(sn + ' ' + sd)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     function formatMirrorLabelWithCost(inf, effRate) {
@@ -70,21 +109,12 @@ window.SoloEngine = (function() {
     }
 
     function getSelfMirrorCopyRatio(skill) {
-        if (!skill || typeof skill !== 'object') return 1.0;
-        var sName = String(skill.name || '').trim();
-        var mLv = sName.match(/(?:LV|Lv|lv|ＬＶ)\s*([0-9]+)/);
-        if (mLv) {
-            var lv = parseInt(mLv[1], 10);
-            if (!isNaN(lv) && lv > 0) {
-                return Math.min(1.0, lv * 0.1);
-            }
-        }
         return SharedDB.getMasterMirrorCopyRate(skill);
     }
 
     function isMasterFirstSkillMirror(sName, sDesc, firstDesc, isFromAdjutant, isHa) {
         if (isFromAdjutant) return false;
-        if (sName.indexOf("副将の") !== -1) return false;
+        if (sName.indexOf("副将") !== -1) return false;
 
         var isVarPrefix = (sName.indexOf("変:") === 0) || (isHa && sName.indexOf("副変:") === 0);
         var hasMirrorKeyword = (
@@ -92,6 +122,8 @@ window.SoloEngine = (function() {
             sName.indexOf("明鏡") !== -1 ||
             sName.indexOf("明鑑") !== -1 ||
             sName.indexOf("王春の") !== -1 ||
+            sName.indexOf("鏡") !== -1 ||
+            sName.indexOf("鑑") !== -1 ||
             sDesc.indexOf("1つ目のスキル") !== -1 ||
             sDesc.indexOf("１つ目のスキル") !== -1 ||
             sDesc.indexOf("最初のスキル") !== -1 ||
@@ -172,6 +204,30 @@ window.SoloEngine = (function() {
         if (lbl && SOLDIER_META[activeKey]) lbl.textContent = SOLDIER_META[activeKey].label;
     }
 
+    // 課金10%や号令変更時にデッキ組み換えを行わず倍率・最終ダメージだけを即座に更新
+    function fastUpdateSoloMultiplier() {
+        if (!currentSetup) { run(false); return; }
+        var buff10Mult = isBuff10 ? 1.1 : 1.0;
+        var elGo = document.getElementById('optSoloGoBuff');
+        var currentGo = isGoEnabled ? SharedDB.safeNum(elGo && elGo.value, goBuffValue) : 0;
+
+        currentSetup.buff10Multiplier = buff10Mult;
+        currentSetup.goBuff = currentGo;
+
+        var finalGenMult = currentSetup.pureGenMult + currentGo;
+        var baseTotalDamage = Math.floor(currentSetup.effectiveAttack * (1 + (finalGenMult / 100)));
+        var finalTotalDamage = Math.floor(baseTotalDamage * buff10Mult);
+
+        currentSetup.finalGenMult = finalGenMult;
+        currentSetup.baseTotalDamage = baseTotalDamage;
+        currentSetup.finalTotalDamage = finalTotalDamage;
+
+        render(currentSetup);
+        var sKey = currentSetup.selectedSoldierFilter || 'HAMMER';
+        var sShort = (SOLDIER_META[sKey] && SOLDIER_META[sKey].short) || '単騎';
+        AppCards.setStatusLog("単騎倍率更新完了 (Ver. 2.07h / " + sShort + "): 最大攻撃力 " + finalTotalDamage.toLocaleString());
+    }
+
     function parseSkill(skill, weatherObj) {
         var empty = {
             gMult: 0, leadBuff: 0, rawAdd: 0,
@@ -193,7 +249,7 @@ window.SoloEngine = (function() {
         var normDesc = (normRawDesc + " " + name).trim();
 
         var isAttackSkill = (name.indexOf("攻:") === 0 || name.indexOf("副攻:") === 0 || name.indexOf("攻防:") === 0 || name.indexOf("副攻防:") === 0);
-        res.isDefPrefix = (name.indexOf("防:") === 0);
+        res.isDefPrefix = (name.indexOf("防:") === 0 || name.indexOf("副防:") === 0);
         var isVarPrefix = (name.indexOf("変:") === 0 || name.indexOf("副変:") === 0);
 
         var hasExplicitManual = /(?:スキル使用中|スキル発動時|発動すると|一定時間|勅令|襲令|斗魂令|号令|戦陣|極意)/.test(normDesc) &&
@@ -221,15 +277,18 @@ window.SoloEngine = (function() {
             res.isSupport = true;
         }
 
-        var isSelfOnly = isAttackSkill || (
+        // 「防:」「変:」系および「勅令/襲令/斗魂令/王威令/覇王令」は単騎エース専用(isSelfOnly)と誤判定しない
+        var isExplicitSupportOrNaisei = res.isDefPrefix || isVarPrefix || res.isGekirei || /(?:勅令|襲令|斗魂令|王威令|覇王令)/.test(name);
+
+        var isSelfOnly = isAttackSkill || (!isExplicitSupportOrNaisei && (
             /(?:進攻|突撃|強襲|遼来撃|猛撃|豪撃|極撃|天撃|神撃|帝撃|龍撃|覇撃|烈撃|雷光|神速|飛将|闘将|騎将|槍将|弓将|攻城|破砕|衝車|劫略|撃破|一騎当千|覇道|滅亡|武神|闘神|軍神)/.test(name) ||
             /(?:自身の攻撃力|この武将の攻撃力|全滅時も発動|討伐ゲージ|持ち帰る資源)/.test(normDesc)
-        );
+        ));
 
-        var affectsGenerals = /(?:全武将|全ての武将|すべての武将|武将|全軍)/.test(normRawDesc) && normRawDesc.indexOf("武将を除く") === -1;
+        var affectsGenerals = /(?:全武将|全ての武将|すべての武将|主将|武将|全軍)/.test(normRawDesc) && normRawDesc.indexOf("武将を除く") === -1;
         var isTrueSupportAura = !isAttackSkill && !isSelfOnly && (
             affectsGenerals ||
-            /(?:勅令|襲令|斗魂令)/.test(name)
+            isExplicitSupportOrNaisei
         );
 
         var isGlobalAura = /(?:全拠点|全ての拠点|すべての拠点|自拠点.*?(?:出兵|出撃))/.test(normDesc);
@@ -240,23 +299,23 @@ window.SoloEngine = (function() {
         var wMult = calcWeatherMultSafe(normRawDesc, weatherObj, '攻撃');
 
         var val = 0;
-        var m1 = normRawDesc.match(/(?:全武将|[^\s、。・]*?科武将|武将|自身|全軍|全拠点)[^\n。]*?攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速|知力|討伐ゲージ))*\s*[がをのは]?\s*([0-9\.]+)[%％]/);
+        var m1 = normRawDesc.match(/(?:全武将|主将|[^\s、。・]*?科武将|武将|自身|全軍|全拠点)[^\n。]*?攻撃(?:力)?(?:(?:[と・、,\/]|及び|および)(?:防御(?:力)?|移動速度|移速|知力|討伐ゲージ|HP|体力))*\s*[がをのは]?\s*([0-9\.]+)[%％]/);
         if (m1) {
             val = parseFloat(m1[1]);
         } else {
-            var m2 = normRawDesc.match(/(?:兵士|軍|兵科|全兵)[、，・,\/\s]+(?:[^\s、。]+科)?武将[^\n。]*?攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速))*\s*[がをのは]?\s*([0-9\.]+)[%％]/);
+            var m2 = normRawDesc.match(/(?:兵士|軍|兵科|全兵)(?:[、，・,\/\s]+|と|及び|および)(?:[^\s、。]+科|全)?武将[^\n。]*?攻撃(?:力)?(?:(?:[と・、,\/]|及び|および)(?:防御(?:力)?|移動速度|移速|知力|討伐ゲージ|HP|体力))*\s*[がをのは]?\s*([0-9\.]+)[%％]/);
             if (m2) {
                 val = parseFloat(m2[1]);
             } else {
                 var isTroopOnlyText = /(?:兵士|槍兵|弓兵|騎兵|剣兵|斧兵|双兵|錘兵)の攻撃/.test(normRawDesc) || normRawDesc.indexOf("武将を除く") !== -1;
                 if (!isTroopOnlyText || isAttackSkill) {
-                    var m3 = normRawDesc.match(/攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速))*\s*[がをのは]?\s*([0-9\.]+)[%％]/);
+                    var m3 = normRawDesc.match(/攻撃(?:力)?(?:(?:[と・、,\/]|及び|および)(?:防御(?:力)?|移動速度|移速|知力|討伐ゲージ|HP|体力))*\s*[がをのは]?\s*([0-9\.]+)[%％]/);
                     if (m3) val = parseFloat(m3[1]);
                 }
             }
         }
 
-        var mExtra = normRawDesc.match(/更に(?:攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速))*\s*[がをのは]?)?\s*([0-9\.]+)[%％]/);
+        var mExtra = normRawDesc.match(/(?:更に|さらに)(?:攻撃(?:力)?(?:(?:[と・、,\/]|及び|および)(?:防御(?:力)?|移動速度|移速|知力|討伐ゲージ))*\s*[がをのは]?)?\s*([0-9\.]+)[%％]/);
         if (mExtra) {
             var extraV = parseFloat(mExtra[1]);
             if (normRawDesc.indexOf("晴天候") !== -1 || normRawDesc.indexOf("晴天") !== -1) {
@@ -302,7 +361,7 @@ window.SoloEngine = (function() {
         return res;
     }
 
-    function buildSoloGeneralAdjutantCand(gCard, masterRole, weatherObj, isSameBaseAsAce) {
+    function buildSoloGeneralAdjutantCand(gCard, masterRole, weatherObj, isSameBaseAsAce, targetMasterRarity) {
         if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
         var skills = gCard.skills || [];
         if (skills.length === 0 || !skills[0]) return null;
@@ -312,7 +371,7 @@ window.SoloEngine = (function() {
 
         var adjRatio = getGeneralAdjutantRarityRatio(gCard.rarity);
         var p0 = parseSkill(s0, weatherObj);
-        var gk0 = SharedDB.getGekireiBonus(s0, gCard.rarity, 4.5);
+        var gk0 = SharedDB.getGekireiBonus(s0, gCard, 4.5, targetMasterRarity || 'SL');
         var gkAdd = Math.floor(((gk0 && gk0.bonus) || 0) * adjRatio);
 
         if (masterRole !== 'lead' && (!p0.isSupport || !p0.isPassive)) return null;
@@ -336,7 +395,7 @@ window.SoloEngine = (function() {
         };
     }
 
-    function evaluateCard(card, weatherObj, mode, masterCost) {
+    function evaluateCard(card, weatherObj, mode, masterCost, targetMasterRarity) {
         var emptySupport = {
             gMult: 0, rawAdd: 0, firstRawAdd: 0, firstGMult: 0,
             naiseiGMult: 0, naiseiRawAdd: 0, naiseiFirstGMult: 0, naiseiMarginalGain: 0,
@@ -347,11 +406,12 @@ window.SoloEngine = (function() {
         var skills = (card && card.skills) || [];
         if (skills.length === 0) return emptySupport;
 
+        var tMasterRar = targetMasterRarity || 'SL';
         var isHa = SharedDB.isHaBusho(card);
         var kMultSelf = SharedDB.getKakuseiMultiplier(card);
         var firstSkill = skills[0];
         var firstDesc = String((firstSkill && firstSkill.description) || '').trim();
-        var firstGk = (!isDuelSkill(firstSkill)) ? SharedDB.getGekireiBonus(firstSkill, card.rarity, masterCost) : { bonus: 0, series: null };
+        var firstGk = (!isDuelSkill(firstSkill)) ? SharedDB.getGekireiBonus(firstSkill, card, masterCost, tMasterRar) : { bonus: 0, series: null };
         var isGekirei = (firstGk && firstGk.bonus > 0);
         var baseGkBonus = isGekirei ? firstGk.bonus : 0;
         var seriesName = isGekirei ? firstGk.series : null;
@@ -386,7 +446,8 @@ window.SoloEngine = (function() {
                     } else {
                         var lRate = getSelfMirrorCopyRatio(ls);
                         if (isGekirei && baseGkBonus > 0) {
-                            leadPassiveRaw += Math.floor((baseGkBonus / kMultSelf) * lRate);
+                            // 檄令の基準テーブル値は覚醒前の素の値であるため kMultSelf で割らない
+                            leadPassiveRaw += Math.floor(baseGkBonus * lRate);
                         } else if (firstVal > 0) {
                             leadPassiveBuff += (firstVal / kMultSelf) * lRate;
                         }
@@ -394,7 +455,7 @@ window.SoloEngine = (function() {
                     continue;
                 }
                 if (lName.indexOf("檄令") !== -1 || lDesc.indexOf("主将の攻撃力が増加") !== -1) {
-                    var lgk = SharedDB.getGekireiBonus(ls, card.rarity, masterCost);
+                    var lgk = SharedDB.getGekireiBonus(ls, card, masterCost, tMasterRar);
                     leadPassiveRaw += (lgk && lgk.bonus) || 0;
                 } else {
                     var lpi2 = parseSkill(ls, weatherObj);
@@ -467,7 +528,8 @@ window.SoloEngine = (function() {
                 } else {
                     var copyRateRatio = getSelfMirrorCopyRatio(s);
                     if (firstIsPassiveSupport) {
-                        if (isGekirei && baseGkBonus > 0) passiveOnlyRaw += Math.floor((baseGkBonus / kMultSelf) * copyRateRatio);
+                        // 檄令はテーブル算出の非覚醒値なので kMultSelf で割らずにそのままコピー率を掛ける
+                        if (isGekirei && baseGkBonus > 0) passiveOnlyRaw += Math.floor(baseGkBonus * copyRateRatio);
                         else if (firstVal > 0) passiveOnlyBuff += (firstVal / kMultSelf) * copyRateRatio;
                     } else if (firstIsNaiseiActive && firstVal > 0) {
                         naiseiMirrorBuff += (firstVal / kMultSelf) * copyRateRatio;
@@ -477,7 +539,7 @@ window.SoloEngine = (function() {
             }
 
             if (sName.indexOf("檄令") !== -1 || sDesc.indexOf("主将の攻撃力が増加") !== -1) {
-                var gk_i = SharedDB.getGekireiBonus(s, card.rarity, masterCost);
+                var gk_i = SharedDB.getGekireiBonus(s, card, masterCost, tMasterRar);
                 passiveOnlyRaw += (gk_i && gk_i.bonus) || 0;
             } else {
                 var sBuff = pi.gMult || 0;
@@ -531,7 +593,7 @@ window.SoloEngine = (function() {
             naiseiMarginalGain: naiseiMarginalGain,
             canBePassiveSlot: !isGuardCard && hasPassiveEffect,
             canBeGuardSlot: isGuardCard && hasPassiveEffect,
-            canBeNaiseiSlot: hasNaiseiActive,
+            canBeNaiseiSlot: hasNaiseiActive && (naiseiTotalBuff > 0 || passiveOnlyRaw > 0),
             passiveMustBeSameBase: passiveMustBeSameBase,
             naiseiMustBeSameBase: naiseiMustBeSameBase,
             isShurei: isShureiCard,
@@ -540,7 +602,7 @@ window.SoloEngine = (function() {
         };
     }
 
-    function getBestWeatherForCard(card, masterCost) {
+    function getBestWeatherForCard(card, masterCost, targetMasterRarity) {
         var weathers = ['SUN', 'CLOUD', 'RAIN', 'SNOW'];
         var bestPassiveW = 'SUN';
         var bestNaiseiW = 'SUN';
@@ -548,10 +610,11 @@ window.SoloEngine = (function() {
         var maxNaiseiEval = null;
         var bestPassiveScore = -1;
         var bestNaiseiScore = -1;
+        var tRar = targetMasterRarity || 'SL';
 
         for (var i = 0; i < weathers.length; i++) {
             var w = weathers[i];
-            var ev = evaluateCard(card, w, 'support', masterCost);
+            var ev = evaluateCard(card, w, 'support', masterCost, tRar);
             var pScore = (ev.gMult || 0) * 100 + (ev.rawAdd || 0);
             if (pScore > bestPassiveScore) {
                 bestPassiveScore = pScore;
@@ -568,8 +631,8 @@ window.SoloEngine = (function() {
         return {
             bestWeather: bestNaiseiW,
             bestPassiveWeather: bestPassiveW,
-            eval: maxPassiveEval || evaluateCard(card, 'SUN', 'support', masterCost),
-            naiseiEval: maxNaiseiEval || evaluateCard(card, 'SUN', 'support', masterCost)
+            eval: maxPassiveEval || evaluateCard(card, 'SUN', 'support', masterCost, tRar),
+            naiseiEval: maxNaiseiEval || evaluateCard(card, 'SUN', 'support', masterCost, tRar)
         };
     }
 
@@ -644,13 +707,14 @@ window.SoloEngine = (function() {
             if (Array.isArray(card.fukusho)) {
                 card.fukusho.forEach(function(rawFk) {
                     var inf = SharedDB.getMirrorSkillInfo(rawFk);
+                    var isTeisenFk = isTeisenAdjutantObject(rawFk);
                     var st = SharedDB.getAdjutantStatusEffect(rawFk, inf);
                     curAtkAdd += st.atkBonus;
-                    if (inf) {
-                        var effRate = SharedDB.calcAdjutantEffectiveCopyRate(card, rawFk, inf);
+                    if (inf || isTeisenFk) {
+                        var effRate = isTeisenFk ? 100 : SharedDB.calcAdjutantEffectiveCopyRate(card, rawFk, inf);
                         curBuffAdd += baseCopyVal * (effRate / 100);
                     } else if (Array.isArray(rawFk.skills) && rawFk.skills.length > 0) {
-                        var gCandCur = buildSoloGeneralAdjutantCand(rawFk, 'lead', 'SUN', true);
+                        var gCandCur = buildSoloGeneralAdjutantCand(rawFk, 'lead', 'SUN', true, card.rarity);
                         if (gCandCur) {
                             curBuffAdd += SharedDB.safeNum(gCandCur.genGMult, 0);
                             curAtkAdd += SharedDB.safeNum(gCandCur.genRaw, 0);
@@ -674,10 +738,11 @@ window.SoloEngine = (function() {
         if (adjutantMode === 'FILL_EMPTY' && Array.isArray(card.fukusho)) {
             card.fukusho.forEach(function(rawFk) {
                 var inf = SharedDB.getMirrorSkillInfo(rawFk);
-                if (inf) {
+                var isTeisenFkF = isTeisenAdjutantObject(rawFk);
+                if (inf || isTeisenFkF) {
                     var st = SharedDB.getAdjutantStatusEffect(rawFk, inf);
                     var c = SharedDB.safeNum(rawFk.cost, 0);
-                    var effRateF = SharedDB.calcAdjutantEffectiveCopyRate(card, rawFk, inf);
+                    var effRateF = isTeisenFkF ? 100 : SharedDB.calcAdjutantEffectiveCopyRate(card, rawFk, inf);
                     fixedSlots.push({ name: rawFk.name, atkAdd: st.atkBonus, buffAdd: baseCopyVal * (effRateF / 100), cost: c });
                     if (rawFk.uniqueId) fixedUsedIds.add(String(rawFk.uniqueId));
                     if (rawFk.cardNo) fixedUsedNos.add(String(rawFk.cardNo));
@@ -739,7 +804,7 @@ window.SoloEngine = (function() {
             // 各カードのサポート性能（全天候最大値）と襲令専用フラグを事前計算
             var supportProbeCache = Object.create(null);
             validCards.forEach(function(c) {
-                supportProbeCache[c.uniqueId] = getBestWeatherForCard(c, 4.5);
+                supportProbeCache[c.uniqueId] = getBestWeatherForCard(c, 4.5, 'SL');
             });
 
             // 帝仙鏡（コスト1化）の事前割り当て
@@ -768,7 +833,7 @@ window.SoloEngine = (function() {
                             effectiveCostMap[c.uniqueId] = 1.0;
                             if (Array.isArray(c.fukusho)) {
                                 c.fukusho.forEach(function(fk) {
-                                    if (fk && (String(fk.name || '') + String(fk.label || '')).indexOf('仙鏡') !== -1) {
+                                    if (fk && isTeisenAdjutantObject(fk)) {
                                         if (fk.uniqueId) usedTeisenCardIds.add(String(fk.uniqueId));
                                     }
                                 });
@@ -785,7 +850,8 @@ window.SoloEngine = (function() {
                     var minTeisenCost = unequippedTeisen.reduce(function(mn, m) {
                         var tc = SharedDB.safeNum((m.card && m.card.cost) !== undefined ? m.card.cost : m.cost, 4.0);
                         return Math.min(mn, tc);
-                    }, 4.0);
+                    }, 99);
+                    if (minTeisenCost === 99) minTeisenCost = 4.0;
 
                     // 襲令専用カードはデッキ全体で最大1枚しか使われないため、2番手以降の襲令ベンチカードに帝仙鏡を奪われないよう制限
                     var shureiOnlyIds = new Set();
@@ -825,17 +891,14 @@ window.SoloEngine = (function() {
                     });
 
                     teisenCandidateList.sort(function(a, b) {
-                        // 1. 元々帝仙鏡を装備していたカードを最優先
                         var eqA = cardHasEquippedTeisen(a) ? 1 : 0;
                         var eqB = cardHasEquippedTeisen(b) ? 1 : 0;
                         if (eqB !== eqA) return eqB - eqA;
 
-                        // 2. 元コストが高い順（4.5コスト削減効果最大）
                         var origA = SharedDB.safeNum(a.originalCost !== undefined ? a.originalCost : a.cost, 4.5);
                         var origB = SharedDB.safeNum(b.originalCost !== undefined ? b.originalCost : b.cost, 4.5);
                         if (Math.abs(origB - origA) > 1e-6) return origB - origA;
 
-                        // 3. サポートスキル威力順
                         var spA = supportProbeCache[a.uniqueId];
                         var spB = supportProbeCache[b.uniqueId];
                         var valA = Math.max(SharedDB.safeNum(spA && spA.eval && spA.eval.gMult, 0), SharedDB.safeNum(spA && spA.naiseiEval && spA.naiseiEval.naiseiGMult, 0));
@@ -866,6 +929,49 @@ window.SoloEngine = (function() {
                 }
             }
 
+            // 「現在の副将のまま計算 (CURRENT)」時に、既に装着されている副将の実効バフ・檄令加算を事前算出してDPへ直接反映
+            var preExistingAdjGMap = Object.create(null);
+            var preExistingAdjGkMap = Object.create(null);
+            if (!isReassignMode) {
+                var curRefW = AppCards.slotWeathers[originSlotId] || 'SUN';
+                validCards.forEach(function(c) {
+                    preExistingAdjGMap[c.uniqueId] = 0;
+                    preExistingAdjGkMap[c.uniqueId] = 0;
+                    if (SharedDB.isHaBusho(c) || !Array.isArray(c.fukusho) || c.fukusho.length === 0) return;
+
+                    var spC = supportProbeCache[c.uniqueId];
+                    var pEvC = spC && spC.eval;
+                    var nEvC = spC && spC.naiseiEval;
+                    var isGuardRoleC = Boolean(pEvC && pEvC.canBeGuardSlot);
+                    var masterRoleC = isGuardRoleC ? 'guard' : 'support';
+
+                    var kMultC = SharedDB.getKakuseiMultiplier(c);
+                    var isGkCardC = Boolean(pEvC && pEvC.isGekirei && pEvC.firstRawAdd > 0);
+                    var firstRawC = isGkCardC ? SharedDB.safeNum(pEvC.firstRawAdd, 0) : 0;
+                    var firstGValC = Math.max(SharedDB.safeNum(pEvC && pEvC.firstGMult, 0), SharedDB.safeNum(nEvC && nEvC.naiseiFirstGMult, 0));
+
+                    c.fukusho.forEach(function(rawFk) {
+                        var inf = SharedDB.getMirrorSkillInfo(rawFk);
+                        var isTeisenFk = isTeisenAdjutantObject(rawFk);
+
+                        if (inf || isTeisenFk) {
+                            var rate = isTeisenFk ? 100 : SharedDB.calcAdjutantEffectiveCopyRate(c, rawFk, inf);
+                            if (isGkCardC && firstRawC > 0) {
+                                preExistingAdjGkMap[c.uniqueId] += firstRawC * (rate / 100);
+                            } else if (firstGValC > 0) {
+                                preExistingAdjGMap[c.uniqueId] += (firstGValC / kMultC) * (rate / 100);
+                            }
+                        } else {
+                            var gCand = buildSoloGeneralAdjutantCand(rawFk, masterRoleC, curRefW, true, 'SL');
+                            if (gCand) {
+                                preExistingAdjGMap[c.uniqueId] += SharedDB.safeNum(gCand.genGMult, 0);
+                                preExistingAdjGkMap[c.uniqueId] += SharedDB.safeNum(gCand.genRaw, 0);
+                            }
+                        }
+                    });
+                });
+            }
+
             var mirrorCount = allMirrorPool.length;
             var initSlCopyRatio = isReassignMode ? (mirrorCount >= 18 ? 1.55 : (mirrorCount >= 10 ? 1.15 : 0.65)) : 0;
             var initLCopyRatio = isReassignMode ? (mirrorCount >= 18 ? 0.65 : (mirrorCount >= 10 ? 0.45 : 0.25)) : 0;
@@ -881,9 +987,10 @@ window.SoloEngine = (function() {
 
             var getBestLeadWeatherEval = function(c) {
                 var effC = effectiveCostMap[c.uniqueId] || SharedDB.safeNum(c.cost, 4.5);
+                var cRar = String(c.rarity || 'SL').toUpperCase();
                 if (!shouldAutoWeather) {
                     var fixedW = AppCards.slotWeathers[originSlotId] || 'SUN';
-                    var fixedEv = evaluateCard(c, fixedW, 'lead', effC);
+                    var fixedEv = evaluateCard(c, fixedW, 'lead', effC, cRar);
                     return { gMult: SharedDB.safeNum(fixedEv.gMult, 0), firstGMult: SharedDB.safeNum(fixedEv.firstGMult, 0), bestWeather: fixedW };
                 }
                 var weathers = ['SUN', 'CLOUD', 'RAIN', 'SNOW'];
@@ -891,7 +998,7 @@ window.SoloEngine = (function() {
                 var maxG = -1;
                 var bestFirstG = 0;
                 for (var wi = 0; wi < weathers.length; wi++) {
-                    var ev = evaluateCard(c, weathers[wi], 'lead', effC);
+                    var ev = evaluateCard(c, weathers[wi], 'lead', effC, cRar);
                     var g = SharedDB.safeNum(ev.gMult, 0);
                     if (g > maxG) {
                         maxG = g;
@@ -908,7 +1015,7 @@ window.SoloEngine = (function() {
             var estGekireiBase = 0;
             var seenGkNos = new Set();
             validCards.forEach(function(c) {
-                var gkEv = evaluateCard(c, 'SUN', 'support', 4.5);
+                var gkEv = evaluateCard(c, 'SUN', 'support', 4.5, 'SL');
                 if (gkEv.canBePassiveSlot && gkEv.isGekirei && gkEv.rawAdd > 0) {
                     var gNo = c.cardNo || c.uniqueId;
                     if (!seenGkNos.has(gNo)) {
@@ -980,6 +1087,7 @@ window.SoloEngine = (function() {
                 var leadGMult = SharedDB.safeNum(leadItem.gMult, 0);
                 var leadBestWeather = leadItem.bestWeather || (AppCards.slotWeathers[originSlotId] || 'SUN');
                 var masterCost = leadEffCost;
+                var masterRarity = String(leadCard.rarity || 'SL').toUpperCase();
                 var leadNo = leadCard.cardNo || leadCard.uniqueId;
 
                 var leadBaseWithAdjEst = SharedDB.safeNum(leadCard.baseAttack, 1000) + SharedDB.safeNum(leadItem.adjAtkBonus, 0);
@@ -989,7 +1097,7 @@ window.SoloEngine = (function() {
                 var shureiPool = [], frontGlobalPool = [], frontBoundPool = [], guardPool = [];
                 validCards.forEach(function(c) {
                     if (c.uniqueId === leadCard.uniqueId || (c.cardNo || c.uniqueId) === leadNo || usedTeisenCardIds.has(c.uniqueId)) return;
-                    var bestSup = getBestWeatherForCard(c, masterCost);
+                    var bestSup = getBestWeatherForCard(c, masterCost, masterRarity);
                     var pProbe = bestSup.eval;
                     var nProbe = bestSup.naiseiEval;
                     var effCost = effectiveCostMap[c.uniqueId] || SharedDB.safeNum(c.cost, 1.0);
@@ -998,10 +1106,16 @@ window.SoloEngine = (function() {
                     var cRarity = String(c.rarity || 'SL').toUpperCase();
                     var estRatio = !hasAdjSlot ? 0 : (cRarity === 'SL' ? initSlCopyRatio : initLCopyRatio);
                     var kSelf = SharedDB.getKakuseiMultiplier(c);
+                    var fixedCurG = !isReassignMode ? SharedDB.safeNum(preExistingAdjGMap[c.uniqueId], 0) : 0;
+                    var fixedCurGk = !isReassignMode ? SharedDB.safeNum(preExistingAdjGkMap[c.uniqueId], 0) : 0;
 
                     var calcInitDpScore = function(gVal, rawVal, fG, fRaw, isGk) {
-                        var estAdjG = hasAdjSlot && !isGk ? ((SharedDB.safeNum(fG, 0) / kSelf) * estRatio) : 0;
-                        var estAdjRaw = hasAdjSlot && isGk ? ((SharedDB.safeNum(fRaw, 0) / kSelf) * estRatio) : 0;
+                        var estAdjG = isReassignMode
+                            ? (hasAdjSlot && !isGk ? ((SharedDB.safeNum(fG, 0) / kSelf) * estRatio) : 0)
+                            : fixedCurG;
+                        var estAdjRaw = isReassignMode
+                            ? (hasAdjSlot && isGk ? (SharedDB.safeNum(fRaw, 0) * estRatio) : 0)
+                            : fixedCurGk;
                         var gScore = initEffAtk * ((SharedDB.safeNum(gVal, 0) + estAdjG) / 100);
                         var rScore = (SharedDB.safeNum(rawVal, 0) + estAdjRaw) * (1 + initTotalMult / 100);
                         return gScore + rScore;
@@ -1081,8 +1195,16 @@ window.SoloEngine = (function() {
                             var ovB = adjBuffOverrideMap ? adjBuffOverrideMap[it.card.uniqueId] : undefined;
                             var ovGk = adjGkOverrideMap ? adjGkOverrideMap[it.card.uniqueId] : undefined;
 
-                            var adjB = (ovB !== undefined) ? SharedDB.safeNum(ovB, 0) : (hasAdjSlot2 && !it.isGekirei ? (SharedDB.safeNum(it.firstGMult, 0) / kS2) * estR2 : 0);
-                            var adjGk = (ovGk !== undefined) ? SharedDB.safeNum(ovGk, 0) : (hasAdjSlot2 && it.isGekirei ? (SharedDB.safeNum(it.firstRawAdd, 0) / kS2) * estR2 : 0);
+                            var adjB = (ovB !== undefined)
+                                ? SharedDB.safeNum(ovB, 0)
+                                : (isReassignMode
+                                    ? (hasAdjSlot2 && !it.isGekirei ? (SharedDB.safeNum(it.firstGMult, 0) / kS2) * estR2 : 0)
+                                    : SharedDB.safeNum(preExistingAdjGMap[it.card.uniqueId], 0));
+                            var adjGk = (ovGk !== undefined)
+                                ? SharedDB.safeNum(ovGk, 0)
+                                : (isReassignMode
+                                    ? (hasAdjSlot2 && it.isGekirei ? (SharedDB.safeNum(it.firstRawAdd, 0) * estR2) : 0)
+                                    : SharedDB.safeNum(preExistingAdjGkMap[it.card.uniqueId], 0));
 
                             var newScore = curEffAtk * ((SharedDB.safeNum(it.gMult, 0) + adjB) / 100) +
                                            (SharedDB.safeNum(it.rawAdd, 0) + adjGk) * curMultFactor;
@@ -1260,7 +1382,7 @@ window.SoloEngine = (function() {
                         Object.keys(bestLocalSetup.activeSlots).forEach(function(sId) {
                             var sItem = bestLocalSetup.activeSlots[sId];
                             var slotW = AppCards.slotWeathers[sId] || sItem.weather || 'SUN';
-                            var reEv = evaluateCard(sItem.card, slotW, 'support', masterCost);
+                            var reEv = evaluateCard(sItem.card, slotW, 'support', masterCost, masterRarity);
                             var updatedItem = Object.assign({}, sItem, {
                                 gMult: SharedDB.safeNum(reEv.naiseiGMult, 0),
                                 rawAdd: SharedDB.safeNum(reEv.naiseiRawAdd, 0),
@@ -1352,7 +1474,7 @@ window.SoloEngine = (function() {
                                 originalCost: SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5),
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 firstSkillVal: fG, baseCopyVal: fG / kMult3, firstSkillObj: firstS3, isGekirei: Boolean(p.isGekirei && fRaw > 0),
-                                firstRawAdd: fRaw, baseCopyRawAdd: fRaw / kMult3
+                                firstRawAdd: fRaw, baseCopyRawAdd: fRaw
                             });
                         }
                     });
@@ -1367,7 +1489,7 @@ window.SoloEngine = (function() {
                                 originalCost: SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5),
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 firstSkillVal: fG, baseCopyVal: fG / kMult3, firstSkillObj: firstS3, isGekirei: Boolean(p.isGekirei && fRaw > 0),
-                                firstRawAdd: fRaw, baseCopyRawAdd: fRaw / kMult3
+                                firstRawAdd: fRaw, baseCopyRawAdd: fRaw
                             });
                         }
                     });
@@ -1382,7 +1504,7 @@ window.SoloEngine = (function() {
                                 originalCost: SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5),
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 firstSkillVal: fG, baseCopyVal: fG / kMult3, firstSkillObj: firstS3, isGekirei: Boolean(p.isGekirei && fRaw > 0),
-                                firstRawAdd: fRaw, baseCopyRawAdd: fRaw / kMult3
+                                firstRawAdd: fRaw, baseCopyRawAdd: fRaw
                             });
                         }
                     });
@@ -1397,7 +1519,7 @@ window.SoloEngine = (function() {
                                 originalCost: SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5),
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 firstSkillVal: fG, baseCopyVal: fG / kMult3, firstSkillObj: firstS3, isGekirei: Boolean(p.isGekirei && fRaw > 0),
-                                firstRawAdd: fRaw, baseCopyRawAdd: fRaw / kMult3
+                                firstRawAdd: fRaw, baseCopyRawAdd: fRaw
                             });
                         }
                     });
@@ -1421,7 +1543,7 @@ window.SoloEngine = (function() {
                         if ((adjutantMode === 'CURRENT' || adjutantMode === 'FILL_EMPTY') && Array.isArray(mCard.fukusho)) {
                             mCard.fukusho.forEach(function(rawFk) {
                                 var inf = SharedDB.getMirrorSkillInfo(rawFk);
-                                var isTeisenFk = isTeisenMirrorItem({ card: rawFk, info: inf });
+                                var isTeisenFk = isTeisenAdjutantObject(rawFk);
                                 var st = SharedDB.getAdjutantStatusEffect(rawFk, inf);
                                 var fkCost = SharedDB.safeNum(rawFk.cost, 0);
                                 usedAdjutantCostMap[mCard.uniqueId] += fkCost;
@@ -1448,7 +1570,7 @@ window.SoloEngine = (function() {
                                         adjutantAddedBuffMap[mCard.uniqueId] += addB0;
                                     }
                                 } else {
-                                    var gCandEx = buildSoloGeneralAdjutantCand(rawFk, master.role, leadBestWeather, master.isSameBaseAsAce);
+                                    var gCandEx = buildSoloGeneralAdjutantCand(rawFk, master.role, leadBestWeather, master.isSameBaseAsAce, masterRarity);
                                     if (gCandEx) {
                                         var fkId2 = String(rawFk.uniqueId || rawFk.id || rawFk.cardNo || '');
                                         var fkNo2 = String(rawFk.cardNo || fkId2);
@@ -1525,7 +1647,7 @@ window.SoloEngine = (function() {
                                 var gc = availableGeneralPool[gi];
                                 var gcNo = gc.cardNo || gc.uniqueId;
                                 if (usedMirrorIds.has(gc.uniqueId) || usedMirrorNos.has(gcNo)) continue;
-                                var gCand = buildSoloGeneralAdjutantCand(gc, master.role, leadBestWeather, master.isSameBaseAsAce);
+                                var gCand = buildSoloGeneralAdjutantCand(gc, master.role, leadBestWeather, master.isSameBaseAsAce, masterRarity);
                                 if (gCand) validGenCands.push(gCand);
                             }
 
@@ -1639,7 +1761,7 @@ window.SoloEngine = (function() {
             }
             currentSetup = bestSetup;
             render(bestSetup);
-            AppCards.setStatusLog("単騎最適化完了 (Ver. 2.06 / " + SOLDIER_META[selectedSoldierFilter].short + "): 最大攻撃力 " + bestSetup.finalTotalDamage.toLocaleString());
+            AppCards.setStatusLog("単騎最適化完了 (Ver. 2.07h / " + SOLDIER_META[selectedSoldierFilter].short + "): 最大攻撃力 " + bestSetup.finalTotalDamage.toLocaleString());
         } catch (err) {
             console.error("SoloEngine.run Error:", err);
             AppCards.setStatusLog("単騎計算エラー: " + err.message, true);
@@ -1811,7 +1933,7 @@ window.SoloEngine = (function() {
                 <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 border-b border-gray-800 pb-4 gap-4">
                     <div>
                         <div class="flex flex-wrap items-center gap-1.5 mb-2">
-                            <span class="text-[10px] font-bold px-2 py-0.5 rounded shadow ${curMeta.badgeColor}">${curMeta.short}単騎 (Ver. 2.06)</span>
+                            <span class="text-[10px] font-bold px-2 py-0.5 rounded shadow ${curMeta.badgeColor}">${curMeta.short}単騎 (Ver. 2.07h)</span>
                             ${extraBadges}
                             <h3 class="text-lg font-bold text-white ml-1">【出撃拠点: <span class="${originColor}">${originName}</span>】</h3>
                         </div>
@@ -1906,7 +2028,7 @@ window.SoloEngine = (function() {
                 if (btnOn) btnOn.className = "py-1 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer";
                 if (lbl) lbl.textContent = "OFF (×1.0)";
             }
-            if (currentSetup) run(false);
+            fastUpdateSoloMultiplier();
         },
         setGoEnabled: function(val) {
             isGoEnabled = val;
@@ -1924,7 +2046,7 @@ window.SoloEngine = (function() {
                 if (btnOn) btnOn.className = "py-1 text-xs font-bold rounded-lg transition text-gray-400 hover:text-white cursor-pointer";
                 if (lbl) lbl.textContent = "OFF (0%)";
             }
-            if (currentSetup) run(false);
+            fastUpdateSoloMultiplier();
         },
         updateGoBuff: function(val) {
             goBuffValue = SharedDB.safeNum(val, 7000);
@@ -1932,7 +2054,7 @@ window.SoloEngine = (function() {
                 var lbl = document.getElementById('labelSoloGoStatus');
                 if (lbl) lbl.innerHTML = '<span class="text-cyan-400 font-bold">ON (+' + goBuffValue + '%)</span>';
             }
-            if (currentSetup) run(false);
+            fastUpdateSoloMultiplier();
         }
     };
 })();

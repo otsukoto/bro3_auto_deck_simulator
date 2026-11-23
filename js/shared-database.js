@@ -1,6 +1,6 @@
 // ========================================================
-// 【共通データ・最適化基盤】js/shared-database.js (Ver. 2.00)
-// 役割：兵科・レアリティ定義、重複ゼロ保証副将プール構築、ナップサックDP、副将コンボ最適化（一般副将パッシブ＆拠点縛り判定対応）
+// 【共通データ・最適化基盤】js/shared-database.js (Ver. 2.08)
+// 役割：兵科・レアリティ定義、重複ゼロ保証副将プール構築、ナップサックDP、副将コンボ最適化（一般副将パッシブ＆拠点縛り判定対応）、檄令（天帝・龍神/鶴神/亀神/獣神/〇神檄令・鬼神の厳密判定＆LV1〜LV10スキルレベル倍率＆主将レアリティ・コスト基準）＆覇超覇(supremacyLevel)補正・覚醒倍率厳密判定対応
 // ========================================================
 window.SharedDB = (function() {
     var GEKIREI_TABLES = {
@@ -32,6 +32,32 @@ window.SharedDB = (function() {
             'C':  { 4.5: 2228,   4.0: 1800,  3.5: 1418,  3.0: 1080,  2.5: 788,   2.0: 540,   1.5: 338,   1.0: 180 }
         }
     };
+
+    // 檄令スキルレベル別効果倍率（LV10 = 1.00）
+    var GEKIREI_LV_RATES = {
+        'RYUJIN': { 1: 0.58, 2: 0.61, 3: 0.64, 4: 0.67, 5: 0.71, 6: 0.75, 7: 0.79, 8: 0.86, 9: 0.93, 10: 1.00 },
+        'TENTEI': { 1: 0.50, 2: 0.5416, 3: 0.5833, 4: 0.625, 5: 0.6666, 6: 0.7083, 7: 0.75, 8: 0.8333, 9: 0.9166, 10: 1.00 },
+        'KISHIN': { 1: 0.70, 2: 0.7125, 3: 0.725, 4: 0.7375, 5: 0.7625, 6: 0.7875, 7: 0.8125, 8: 0.875, 9: 0.9375, 10: 1.00 }
+    };
+
+    // 覇武将の超覇(+5時点)最大上昇率（+1ごとに1/5ずつ増加）
+    var CHOUHA_MAX_RATES = {
+        'SL': 0.30,   // +30% (+6% per level)
+        'L':  0.20,   // +20% (+4% per level)
+        'UR': 0.125,  // +12.5% (+2.5% per level)
+        'SR': 0.10,   // +10% (+2% per level)
+        'R':  0.075   // +7.5% (+1.5% per level)
+    };
+
+    function getSupremacyMultiplier(card) {
+        if (!card || typeof card !== 'object') return 1.0;
+        var supLv = Math.floor(safeNum(card.supremacyLevel, 0));
+        if (supLv <= 0) return 1.0;
+        supLv = Math.min(5, Math.max(0, supLv));
+        var rar = String(card.rarity || 'SL').toUpperCase().replace(/覇/g, '').trim();
+        var maxRate = CHOUHA_MAX_RATES[rar] !== undefined ? CHOUHA_MAX_RATES[rar] : 0;
+        return 1.0 + maxRate * (supLv / 5.0);
+    }
 
     var TROOP_DATA = {
         "HEAVY_BOW": { name: "重装弓兵", attack: 286, type: "天兵", base: "弓兵", sub: "弓兵科" },
@@ -291,6 +317,7 @@ window.SharedDB = (function() {
     function isHaBusho(card) {
         if (!card) return false;
         if (card.isHa) return true;
+        if (safeNum(card.supremacyLevel, 0) > 0) return true;
         var c = String(card.country || '');
         if (c === '覇') return true;
         var n = String(card.name || '');
@@ -312,28 +339,87 @@ window.SharedDB = (function() {
         return parts.map(function(p) { return String(p).trim(); }).filter(function(p) { return p.length > 0; });
     }
 
-    function getGekireiBonus(skill, cardRarity, masterCost) {
+    // =========================================================================
+    // 【檄令ボーナス算出関数】
+    // 引数：
+    //   skill              : スキルオブジェクト
+    //   holderCardOrRarity : 檄令所持カードオブジェクト（または後方互換のレアリティ文字列）
+    //   masterCost         : 受け手主将（エース）のコスト（1.0〜4.5）
+    //   targetMasterRarity : 受け手主将（エース）のレアリティ（省略時は 'SL'）
+    // =========================================================================
+    function getGekireiBonus(skill, holderCardOrRarity, masterCost, targetMasterRarity) {
         var name = String((skill && skill.name) || '');
         var desc = String((skill && skill.description) || '');
         var text = name + " " + desc;
-        if (text.indexOf("檄令") === -1 && text.indexOf("主将の攻撃力が増加") === -1 && text.indexOf("全武将の攻撃力が増加") === -1) return { bonus: 0, series: null };
+        if (text.indexOf("檄令") === -1 && text.indexOf("主将の攻撃力が増加") === -1 && text.indexOf("全武将の攻撃力が増加") === -1) {
+            return { bonus: 0, series: null };
+        }
 
+        // 1. 檄令シリーズ判定
+        //    - 天帝系: 天帝檄令
+        //    - 龍神系: 龍神檄令・鶴神檄令・亀神檄令・獣神檄令・虎神檄令 など「[漢字]神檄令」全般（鬼神を除く）
+        //    - 鬼神系: 鬼神檄令
+        //    - 無印下位系: 帝檄令 / 天檄令 / 神檄令 / 大檄令
         var series = 'TENTEI';
         var seriesName = '天帝';
-        if (text.indexOf("鬼神") !== -1 || name.indexOf("大檄令") !== -1) { series = 'KISHIN'; seriesName = '鬼神'; }
-        else if (text.indexOf("龍神") !== -1 || text.indexOf("亀神") !== -1 || name.indexOf("神檄令") !== -1) { series = 'RYUJIN'; seriesName = text.indexOf("亀神") !== -1 ? '亀神' : '龍神'; }
+        var isNamedMajorSeries = false;
+        var mPrefixedKami = (name + ' ' + desc).match(/([^\s:：・×\(\)（）【】\[\]]+)神檄令/);
 
-        var r = String(cardRarity || 'SL').toUpperCase();
-        if (name.indexOf("帝") !== -1) r = 'SL';
-        else if (name.indexOf("天") !== -1) r = 'L';
-        else if (name.indexOf("神") !== -1 && name.indexOf("龍神") === -1 && name.indexOf("亀神") === -1 && name.indexOf("鬼神") === -1) r = 'UR';
-        else if (name.indexOf("大") !== -1 && name.indexOf("鬼神") === -1) r = 'SR';
+        if (text.indexOf("天帝") !== -1) {
+            series = 'TENTEI';
+            seriesName = '天帝';
+            isNamedMajorSeries = true;
+        } else if (text.indexOf("鬼神") !== -1) {
+            series = 'KISHIN';
+            seriesName = '鬼神';
+            isNamedMajorSeries = true;
+        } else if (mPrefixedKami) {
+            series = 'RYUJIN';
+            seriesName = mPrefixedKami[1] + '神';
+            isNamedMajorSeries = true;
+        } else if (text.indexOf("龍神") !== -1 || text.indexOf("鶴神") !== -1 || text.indexOf("亀神") !== -1 || text.indexOf("獣神") !== -1) {
+            series = 'RYUJIN';
+            seriesName = '龍神';
+            isNamedMajorSeries = true;
+        } else if (name.indexOf("大檄令") !== -1) {
+            series = 'KISHIN';
+            seriesName = '鬼神';
+        } else if (name.indexOf("神檄令") !== -1) {
+            series = 'RYUJIN';
+            seriesName = '龍神';
+        }
+
+        // 2. スキルレベル（LV1〜LV10）抽出と倍率取得
+        var mLv = (name + ' ' + desc).match(/(?:LV|Lv|lv|ＬＶ|レベル)\s*([0-9]+)/);
+        var skillLv = mLv ? Math.min(10, Math.max(1, parseInt(mLv[1], 10))) : 10;
+        var lvTable = GEKIREI_LV_RATES[series] || GEKIREI_LV_RATES['TENTEI'];
+        var lvRatio = (lvTable && lvTable[skillLv] !== undefined) ? lvTable[skillLv] : 1.0;
+
+        // 3. テーブル参照レアリティ（受け手主将のレアリティ基準）
+        var holderCard = (holderCardOrRarity && typeof holderCardOrRarity === 'object') ? holderCardOrRarity : null;
+        var rawTargetRar = targetMasterRarity || 'SL';
+        var r = String(rawTargetRar).toUpperCase().replace(/覇/g, '').trim();
+        if (!RARITY_ORDER[r]) r = 'SL';
+
+        if (!isNamedMajorSeries) {
+            if (name.indexOf("帝檄令") !== -1) r = 'SL';
+            else if (name.indexOf("天檄令") !== -1) r = 'L';
+            else if (name.indexOf("神檄令") !== -1) r = 'UR';
+            else if (name.indexOf("大檄令") !== -1) r = 'SR';
+        }
 
         var c = Math.round((Number(masterCost) || 4.5) * 2) / 2;
         c = Math.max(1.0, Math.min(4.5, c));
 
-        var table = (GEKIREI_TABLES[series] || GEKIREI_TABLES['TENTEI'])[r] || (GEKIREI_TABLES[series] || GEKIREI_TABLES['TENTEI'])['SL'];
-        return { bonus: table[c] || 0, series: seriesName };
+        var seriesTable = GEKIREI_TABLES[series] || GEKIREI_TABLES['TENTEI'];
+        var table = seriesTable[r] || seriesTable['SL'];
+        var baseBonus = table[c] || 0;
+
+        // 4. スキルレベル倍率 × 覇武将の超覇レベル（supremacyLevel: 1〜5）倍率を乗算
+        var supMult = holderCard ? getSupremacyMultiplier(holderCard) : 1.0;
+        var finalBonus = Math.round(baseBonus * lvRatio * supMult);
+
+        return { bonus: finalBonus, series: seriesName, baseBonus: baseBonus, lvRatio: lvRatio, supremacyMult: supMult };
     }
 
     function getKakuseiMultiplier(card) {
@@ -345,8 +431,10 @@ window.SharedDB = (function() {
             if (!s) continue;
             var sName = String(s.name || '').trim();
             var sDesc = String(s.description || '').trim();
-            if (sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || sName.indexOf('覚醒') !== -1 || sDesc.indexOf('覚醒') !== -1) {
-                var m = sDesc.match(/([0-9\.]+)倍/);
+            if (sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || sName.indexOf('覚醒') !== -1) {
+                var mTarget = sDesc.match(/(?:スキル効果|効果)[をがは]?\s*([0-9\.]+)\s*倍/);
+                if (mTarget) return parseFloat(mTarget[1]);
+                var m = sDesc.match(/([0-9\.]+)\s*倍/);
                 return m ? parseFloat(m[1]) : 3.0;
             }
         }
@@ -863,6 +951,8 @@ window.SharedDB = (function() {
 
     return {
         GEKIREI_TABLES: GEKIREI_TABLES,
+        GEKIREI_LV_RATES: GEKIREI_LV_RATES,
+        CHOUHA_MAX_RATES: CHOUHA_MAX_RATES,
         TROOP_DATA: TROOP_DATA,
         DEF_TROOP_DATA: DEF_TROOP_DATA,
         ADJUTANT_RATES: ADJUTANT_RATES,
@@ -875,6 +965,7 @@ window.SharedDB = (function() {
         isHaBusho: isHaBusho,
         isMirrorCard: isMirrorCard,
         isFemaleOrOtherBusho: isFemaleOrOtherBusho,
+        getSupremacyMultiplier: getSupremacyMultiplier,
         getMasterMirrorCopyRate: getMasterMirrorCopyRate,
         calcCostAdjustedRatio: calcCostAdjustedRatio,
         calcAdjutantEffectiveCopyRate: calcAdjutantEffectiveCopyRate,

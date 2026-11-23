@@ -1,6 +1,6 @@
 // ========================================================
-// 【兵士防御計算エンジン】js/engine-def.js (Ver. 2.07)
-// 役割：拠点防衛・南蛮太守5枠最適化、2拠点同時DP最適配分、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）、警護デッキ副将の「警悟」限定制限、既存副将2重加算防止＆天候判定完全対応
+// 【兵士防御計算エンジン】js/engine-def.js (Ver. 2.08)
+// 役割：拠点防衛・南蛮太守5枠最適化、主将コピースキル(skills[0]基準・檄令非覚醒除算修正)、龍神/亀神/獣神/鬼神/天帝檄令＆覇超覇(supremacyLevel)補正対応、2拠点同時DP最適配分、「現在の副将のまま計算」時の帝仙鏡(コスト1化)＆既存副将バフ事前反映、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）、警護デッキ副将の「警悟」限定制限、既存副将2重加算防止＆天候判定完全対応
 // ========================================================
 window.DefEngine = (function() {
     var isDefBuff10 = false;
@@ -29,20 +29,59 @@ window.DefEngine = (function() {
         return GENERAL_ADJUTANT_RARITY_RATES[r] !== undefined ? GENERAL_ADJUTANT_RARITY_RATES[r] : 0.40;
     }
 
+    function hasTeisenKeywordInText(txt) {
+        if (!txt) return false;
+        return txt.indexOf('帝仙鏡') !== -1 ||
+               txt.indexOf('仙鏡') !== -1 ||
+               txt.indexOf('コストが1') !== -1 ||
+               txt.indexOf('コストを1') !== -1;
+    }
+
+    function isTeisenAdjutantObject(fk) {
+        if (!fk || typeof fk !== 'object') return false;
+        var inf = SharedDB.getMirrorSkillInfo ? SharedDB.getMirrorSkillInfo(fk) : null;
+        if (inf && (inf.type === 'senkyo' || inf.type === 'teisen' || inf.type === 'teisenkyo')) return true;
+        var topTxt = String(fk.name || '') + ' ' + String(fk.label || '') + ' ' + String(fk.description || '') + ' ' + (inf ? String(inf.label || '') : '');
+        if (hasTeisenKeywordInText(topTxt)) return true;
+        if (Array.isArray(fk.skills)) {
+            for (var i = 0; i < fk.skills.length; i++) {
+                var sk = fk.skills[i];
+                if (!sk) continue;
+                var skTxt = String(sk.name || '') + ' ' + String(sk.description || '');
+                if (hasTeisenKeywordInText(skTxt)) return true;
+            }
+        }
+        return false;
+    }
+
     function isTeisenMirrorItem(m) {
         if (!m) return false;
         if (m.info && (m.info.type === 'senkyo' || m.info.type === 'teisen' || m.info.type === 'teisenkyo')) return true;
-        var nm = String((m.card && m.card.name) || m.name || '') + ' ' + String((m.info && m.info.label) || '');
-        return nm.indexOf('帝仙鏡') !== -1 || nm.indexOf('仙鏡') !== -1;
+        if (m.card && isTeisenAdjutantObject(m.card)) return true;
+        return isTeisenAdjutantObject(m);
     }
 
     function cardHasEquippedTeisen(c) {
-        if (!c || !Array.isArray(c.fukusho)) return false;
-        return c.fukusho.some(function(fk) {
-            if (!fk) return false;
-            var t = String(fk.name || '') + ' ' + String(fk.label || '') + ' ' + String(fk.description || '');
-            return t.indexOf('帝仙鏡') !== -1 || t.indexOf('仙鏡') !== -1;
-        });
+        if (!c) return false;
+        if (c.hasTeisenkyo) return true;
+        if (c.originalCost !== undefined && SharedDB.safeNum(c.originalCost, 0) > 1.0 + 1e-6 && SharedDB.safeNum(c.cost, 4.5) <= 1.0 + 1e-6) {
+            return true;
+        }
+        if (Array.isArray(c.fukusho) && c.fukusho.some(isTeisenAdjutantObject)) {
+            return true;
+        }
+        if (Array.isArray(c.skills)) {
+            for (var i = 0; i < c.skills.length; i++) {
+                var sk = c.skills[i];
+                if (!sk) continue;
+                var sn = String(sk.name || '');
+                var sd = String(sk.description || '');
+                if ((sn.indexOf('副') === 0 || sn.indexOf('仙鏡') !== -1) && hasTeisenKeywordInText(sn + ' ' + sd)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     function formatMirrorLabelWithCost(inf, effRate) {
@@ -63,34 +102,11 @@ window.DefEngine = (function() {
     }
 
     function getSelfMirrorCopyRatio(skill) {
-        if (!skill || typeof skill !== 'object') return 1.0;
-        var sName = String(skill.name || '').trim();
-        var mLv = sName.match(/(?:LV|Lv|lv|ＬＶ)\s*([0-9]+)/);
-        if (mLv) {
-            var lv = parseInt(mLv[1], 10);
-            if (!isNaN(lv) && lv > 0) {
-                return Math.min(1.0, lv * 0.1);
-            }
-        }
         return SharedDB.getMasterMirrorCopyRate(skill);
     }
 
     function getDefKakuseiMult(card) {
-        if (!card || !Array.isArray(card.skills)) return 1.0;
-        for (var i = 0; i < card.skills.length; i++) {
-            var s = card.skills[i];
-            if (!s) continue;
-            var sName = String(s.name || '').trim();
-            var sDesc = String(s.description || '').trim();
-            if (sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || sName.indexOf('覚醒') !== -1 || sDesc.indexOf('覚醒') !== -1) {
-                var mTimes = sDesc.match(/([0-9\.]+)倍/);
-                if (mTimes) return parseFloat(mTimes[1]);
-                var mPct = sDesc.match(/([0-9\.]+)[%％]上昇/);
-                if (mPct) return 1 + (parseFloat(mPct[1]) / 100);
-                return 3.0;
-            }
-        }
-        return 1.0;
+        return SharedDB.getKakuseiMultiplier(card);
     }
 
     function calcWeatherMultSafe(rawDesc, weatherObj, targetStat) {
@@ -325,6 +341,7 @@ window.DefEngine = (function() {
         var firstSkill = skills[0];
         var p0 = parseDefSkill(firstSkill, targetTroopData, weatherObj);
         if (!p0.isDefSkill) return empty;
+        var firstDesc = String(firstSkill.description || '').trim();
 
         var passiveTMult = 0, passiveGMult = 0;
         var passivePerCountry = 0, reqCountry = p0.reqCountry;
@@ -341,6 +358,7 @@ window.DefEngine = (function() {
             var s = skills[idx];
             if (!s || typeof s !== 'object') continue;
             var sName = String(s.name || '').trim();
+            var sDesc = String(s.description || '').trim();
 
             if (sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || sName.indexOf('覚醒') !== -1) continue;
             if (isDuelSkill(s)) continue;
@@ -355,7 +373,8 @@ window.DefEngine = (function() {
                 sName.indexOf('主将の') !== -1 ||
                 sName.indexOf('明鑑') !== -1 ||
                 sName.indexOf('王春の') !== -1 ||
-                (sName.indexOf('明鏡') !== -1 && sName.indexOf('副将の') === -1) ||
+                (sName.indexOf('鏡') !== -1 && sName.indexOf('副将') === -1) ||
+                (sName.indexOf('鑑') !== -1 && sName.indexOf('副将') === -1) ||
                 (isHa && sName.indexOf('副変:') === 0)
             );
 
@@ -618,7 +637,7 @@ window.DefEngine = (function() {
                             effectiveCostMap[c.uniqueId] = 1.0;
                             if (Array.isArray(c.fukusho)) {
                                 c.fukusho.forEach(function(fk) {
-                                    if (fk && (String(fk.name || '') + String(fk.label || '')).indexOf('仙鏡') !== -1) {
+                                    if (fk && isTeisenAdjutantObject(fk)) {
                                         if (fk.uniqueId) usedTeisenCardIds.add(String(fk.uniqueId));
                                     }
                                 });
@@ -707,6 +726,34 @@ window.DefEngine = (function() {
                 }
             }
 
+            // 「現在の副将のまま計算 (CURRENT)」時に、既に装着されている副将の実効バフを事前算出してDPへ直接反映
+            var preExistingAdjTMap = Object.create(null);
+            if (!isReassignMode) {
+                validCards.forEach(function(c) {
+                    preExistingAdjTMap[c.uniqueId] = 0;
+                    if (SharedDB.isHaBusho(c) || !Array.isArray(c.fukusho) || c.fukusho.length === 0) return;
+                    var dpC = defProbeCache[c.uniqueId];
+                    var evC = dpC && dpC.eval;
+                    var isGuardRoleC = Boolean(evC && evC.isGuard);
+                    var kMultC = getDefKakuseiMult(c);
+                    var firstTValC = SharedDB.safeNum(evC && evC.firstTMult, 0);
+
+                    c.fukusho.forEach(function(rawFk) {
+                        var inf = SharedDB.getMirrorSkillInfo(rawFk);
+                        var isTeisenFk = isTeisenAdjutantObject(rawFk);
+                        if (inf || isTeisenFk) {
+                            var rate = isTeisenFk ? 100 : SharedDB.calcAdjutantEffectiveCopyRate(c, rawFk, inf);
+                            preExistingAdjTMap[c.uniqueId] += (firstTValC / kMultC) * (rate / 100);
+                        } else {
+                            var gCand = buildDefGeneralAdjutantCand(rawFk, targetTroopData, 'SUN', true, isGuardRoleC);
+                            if (gCand) {
+                                preExistingAdjTMap[c.uniqueId] += SharedDB.safeNum(gCand.genTMult, 0);
+                            }
+                        }
+                    });
+                });
+            }
+
             var frontGlobalPool = [];
             var frontBoundPool = [];
             var guardBoundPool = [];
@@ -720,7 +767,7 @@ window.DefEngine = (function() {
                 if (!ev || (ev.tMult <= 0 && ev.perSameCountryMult <= 0 && ev.dmgReduce <= 0)) continue;
 
                 var effCost = effectiveCostMap[c.uniqueId];
-                var estValue = ev.tMult + (ev.perSameCountryMult * 4) + (ev.dmgReduce * 15);
+                var estValue = ev.tMult + (ev.perSameCountryMult * 4) + (ev.dmgReduce * 15) + (!isReassignMode ? SharedDB.safeNum(preExistingAdjTMap[c.uniqueId], 0) : 0);
                 var item = {
                     card: c,
                     effectiveCost: effCost,
@@ -953,7 +1000,7 @@ window.DefEngine = (function() {
                 if ((defAdjutantMode === 'CURRENT' || defAdjutantMode === 'FILL_EMPTY') && Array.isArray(mCard.fukusho)) {
                     mCard.fukusho.forEach(function(rawFk) {
                         var inf = SharedDB.getMirrorSkillInfo(rawFk);
-                        var isTeisenFk = isTeisenMirrorItem({ card: rawFk, info: inf });
+                        var isTeisenFk = isTeisenAdjutantObject(rawFk);
                         var st = SharedDB.getAdjutantStatusEffect(rawFk, inf);
                         var fkCost = SharedDB.safeNum(rawFk.cost, 0);
                         usedAdjutantCostMap[mCard.uniqueId] += fkCost;
@@ -1181,7 +1228,7 @@ window.DefEngine = (function() {
             currentDefSetup = setup;
             render(setup);
             var modeTag = isNanbanMode ? ("南蛮モード・太守" + pickedNanbanTaishu.length + "枠 / 節約" + nanbanSavedCost.toFixed(1) + "C") : "通常防衛モード";
-            AppCards.setStatusLog("兵士防御最適化完了 (Ver. 2.06 / " + modeTag + "): 総合防御力 " + finalTotalDefense.toLocaleString());
+            AppCards.setStatusLog("兵士防御最適化完了 (Ver. 2.07h / " + modeTag + "): 総合防御力 " + finalTotalDefense.toLocaleString());
         } catch (err) {
             console.error("DefEngine.run Error:", err);
             AppCards.setStatusLog("兵士防御計算エラー: " + err.message, true);
@@ -1381,7 +1428,7 @@ window.DefEngine = (function() {
                 <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 border-b border-gray-800 pb-4 gap-4">
                     <div>
                         <div class="flex flex-wrap items-center gap-1.5 mb-2">
-                            <span class="bg-sky-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">兵士防御計算結果 (Ver. 2.06)</span>
+                            <span class="bg-sky-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">兵士防御計算結果 (Ver. 2.07h)</span>
                             <span class="bg-gray-800 border border-gray-600 text-amber-300 text-[10px] font-bold px-2 py-0.5 rounded">有効内政枠: 本拠${setup.maxHonkyoNaisei} + 拠点${setup.maxKyotenNaisei}</span>
                             ${extraBadges}
                             <h3 class="text-lg font-bold text-white ml-1">【防衛拠点: <span class="${baseColor}">${baseLabel}</span>】</h3>

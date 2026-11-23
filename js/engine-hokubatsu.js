@@ -1,6 +1,6 @@
 // ========================================================
-// 【北伐統合デッキ計算エンジン】js/engine-hokubatsu.js (Ver. 2.07)
-// 役割：北伐引率・単騎統合デッキ最適化、既存副将2重加算バグ修正、速度陣副将速度限定、一般副将レアリティ倍率、天候・号令対応
+// 【北伐統合デッキ計算エンジン】js/engine-hokubatsu.js (Ver. 2.08)
+// 役割：北伐引率・単騎統合デッキ最適化、主将コピースキル(skills[0]基準・檄令非覚醒除算修正)、龍神/亀神/獣神/鬼神/天帝檄令（主将レアリティ・コスト基準）＆覇超覇(supremacyLevel)補正対応、「現在の副将のまま計算」時の帝仙鏡(コスト1化)＆既存副将バフ・速度事前反映、既存副将2重加算バグ修正、速度陣副将速度限定、一般副将レアリティ倍率、天候・号令対応
 // ========================================================
 window.HokubatsuEngine = (function() {
     var isBuff10 = false;
@@ -44,6 +44,61 @@ window.HokubatsuEngine = (function() {
         return GENERAL_ADJUTANT_RARITY_RATES[r] !== undefined ? GENERAL_ADJUTANT_RARITY_RATES[r] : 0.40;
     }
 
+    function hasTeisenKeywordInText(txt) {
+        if (!txt) return false;
+        return txt.indexOf('帝仙鏡') !== -1 ||
+               txt.indexOf('仙鏡') !== -1 ||
+               txt.indexOf('コストが1') !== -1 ||
+               txt.indexOf('コストを1') !== -1;
+    }
+
+    function isTeisenAdjutantObject(fk) {
+        if (!fk || typeof fk !== 'object') return false;
+        var inf = SharedDB.getMirrorSkillInfo ? SharedDB.getMirrorSkillInfo(fk) : null;
+        if (inf && (inf.type === 'senkyo' || inf.type === 'teisen' || inf.type === 'teisenkyo')) return true;
+        var topTxt = String(fk.name || '') + ' ' + String(fk.label || '') + ' ' + String(fk.description || '') + ' ' + (inf ? String(inf.label || '') : '');
+        if (hasTeisenKeywordInText(topTxt)) return true;
+        if (Array.isArray(fk.skills)) {
+            for (var i = 0; i < fk.skills.length; i++) {
+                var sk = fk.skills[i];
+                if (!sk) continue;
+                var skTxt = String(sk.name || '') + ' ' + String(sk.description || '');
+                if (hasTeisenKeywordInText(skTxt)) return true;
+            }
+        }
+        return false;
+    }
+
+    function isTeisenMirrorItem(m) {
+        if (!m) return false;
+        if (m.info && (m.info.type === 'senkyo' || m.info.type === 'teisen' || m.info.type === 'teisenkyo')) return true;
+        if (m.card && isTeisenAdjutantObject(m.card)) return true;
+        return isTeisenAdjutantObject(m);
+    }
+
+    function cardHasEquippedTeisen(c) {
+        if (!c) return false;
+        if (c.hasTeisenkyo) return true;
+        if (c.originalCost !== undefined && SharedDB.safeNum(c.originalCost, 0) > 1.0 + 1e-6 && SharedDB.safeNum(c.cost, 4.5) <= 1.0 + 1e-6) {
+            return true;
+        }
+        if (Array.isArray(c.fukusho) && c.fukusho.some(isTeisenAdjutantObject)) {
+            return true;
+        }
+        if (Array.isArray(c.skills)) {
+            for (var i = 0; i < c.skills.length; i++) {
+                var sk = c.skills[i];
+                if (!sk) continue;
+                var sn = String(sk.name || '');
+                var sd = String(sk.description || '');
+                if ((sn.indexOf('副') === 0 || sn.indexOf('仙鏡') !== -1) && hasTeisenKeywordInText(sn + ' ' + sd)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     function formatMirrorLabelWithCost(inf, effRate) {
         if (!inf) return '';
         if (inf.type === 'meikyo' && Math.abs(effRate - SharedDB.safeNum(inf.rate, 80)) > 0.05) {
@@ -62,21 +117,7 @@ window.HokubatsuEngine = (function() {
     }
 
     function getKakuseiMult(card) {
-        if (!card || !Array.isArray(card.skills)) return 1.0;
-        for (var i = 0; i < card.skills.length; i++) {
-            var s = card.skills[i];
-            if (!s) continue;
-            var sName = String(s.name || '').trim();
-            var sDesc = String(s.description || '').trim();
-            if (sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || sName.indexOf('覚醒') !== -1 || sDesc.indexOf('覚醒') !== -1) {
-                var mTimes = sDesc.match(/([0-9\.]+)倍/);
-                if (mTimes) return parseFloat(mTimes[1]);
-                var mPct = sDesc.match(/([0-9\.]+)[%％]上昇/);
-                if (mPct) return 1 + (parseFloat(mPct[1]) / 100);
-                return 3.0;
-            }
-        }
-        return 1.0;
+        return SharedDB.getKakuseiMultiplier(card);
     }
 
     function calcWeatherMultSafe(rawDesc, weatherObj, targetStat) {
@@ -337,14 +378,15 @@ window.HokubatsuEngine = (function() {
         };
         if (skills.length === 0) return empty;
 
+        var tMasterRar = masterRarity || 'SL';
         var isHa = SharedDB.isHaBusho(card);
         var hasFukushoArr = Array.isArray(card.fukusho) && card.fukusho.length > 0;
         var shouldStripAdjSkills = Boolean(excludeSubSkills || hasFukushoArr);
 
         var s0 = skills[0];
         var p0 = parseHokuSkill(s0, targetTroopData, w);
-        var gk0 = (!isDuelSkill(s0)) ? SharedDB.getGekireiBonus(s0, card.rarity, masterCost) : { bonus: 0, series: null };
-        var rr0 = (!isDuelSkill(s0)) ? HokubatsuDB.getRaireiSpeedBonus(s0, masterRarity) : { addSpeed: 0, baseSpeed: 0, series: null };
+        var gk0 = (!isDuelSkill(s0)) ? SharedDB.getGekireiBonus(s0, card, masterCost, tMasterRar) : { bonus: 0, series: null };
+        var rr0 = (!isDuelSkill(s0)) ? HokubatsuDB.getRaireiSpeedBonus(s0, tMasterRar) : { addSpeed: 0, baseSpeed: 0, series: null };
 
         var baseGk = (gk0 && gk0.bonus) || 0;
         var baseRr = (rr0 && rr0.addSpeed) || 0;
@@ -373,13 +415,14 @@ window.HokubatsuEngine = (function() {
                 sName.indexOf('主将の') !== -1 ||
                 sName.indexOf('明鑑') !== -1 ||
                 sName.indexOf('王春の') !== -1 ||
-                (sName.indexOf('明鏡') !== -1 && sName.indexOf('副将の') === -1) ||
+                (sName.indexOf('鏡') !== -1 && sName.indexOf('副将') === -1) ||
+                (sName.indexOf('鑑') !== -1 && sName.indexOf('副将') === -1) ||
                 (isHa && sName.indexOf('副変:') === 0)
             );
 
             var pi = parseHokuSkill(sk, targetTroopData, w);
-            var gki = SharedDB.getGekireiBonus(sk, card.rarity, masterCost);
-            var rri = HokubatsuDB.getRaireiSpeedBonus(sk, masterRarity);
+            var gki = SharedDB.getGekireiBonus(sk, card, masterCost, tMasterRar);
+            var rri = HokubatsuDB.getRaireiSpeedBonus(sk, tMasterRar);
 
             if (isSelfMirror) {
                 var hasWritten = (pi.tMult > 0 || pi.gMult > 0 || pi.speedPct > 0 || (gki && gki.bonus > 0) || (rri && rri.addSpeed > 0));
@@ -471,7 +514,7 @@ window.HokubatsuEngine = (function() {
         var mustBeSameBase = pLead.mustBeSameBase && pSolo.mustBeSameBase;
         var isPassiveFirst = pLead.isPassive || pSolo.isPassive;
 
-        var gk0 = SharedDB.getGekireiBonus(s0, gCard.rarity, 4.5);
+        var gk0 = SharedDB.getGekireiBonus(s0, gCard, 4.5, 'SL');
         var rr0 = HokubatsuDB.getRaireiSpeedBonus(s0, 'SL');
         var bestSoloGk = Math.floor(((gk0 && gk0.bonus) || 0) * adjRatio);
         var bestSoloRr = Math.round(((rr0 && rr0.addSpeed) || 0) * adjRatio * 100) / 100;
@@ -587,10 +630,11 @@ window.HokubatsuEngine = (function() {
                 var c = item.card;
                 if (seenCands.has(c.uniqueId)) return;
                 var origC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
+                var maxFk = SharedDB.safeNum(c.maxFukushoCost, 0);
                 if (!SharedDB.isHaBusho(c) &&
                     String(c.rarity || '').toUpperCase() === 'SL' &&
-                    SharedDB.safeNum(c.maxFukushoCost, 0) > 0 &&
-                    origC > 1.0) {
+                    maxFk >= 4.0 - 1e-6 &&
+                    origC > 1.0 + 1e-6) {
                     seenCands.add(c.uniqueId);
                     candidates.push(item);
                 }
@@ -598,10 +642,14 @@ window.HokubatsuEngine = (function() {
         });
 
         candidates.sort(function(a, b) {
+            var eqA = cardHasEquippedTeisen(a.card) ? 1 : 0;
+            var eqB = cardHasEquippedTeisen(b.card) ? 1 : 0;
+            if (eqB !== eqA) return eqB - eqA;
+
             var kA = getKakuseiMult(a.card);
             var kB = getKakuseiMult(b.card);
-            var copyValA = (SharedDB.safeNum(a.firstTMult, 0) + SharedDB.safeNum(a.firstGMult, 0)) / kA + (SharedDB.safeNum(a.firstGekirei, 0) / kA) * 0.1;
-            var copyValB = (SharedDB.safeNum(b.firstTMult, 0) + SharedDB.safeNum(b.firstGMult, 0)) / kB + (SharedDB.safeNum(b.firstGekirei, 0) / kB) * 0.1;
+            var copyValA = (SharedDB.safeNum(a.firstTMult, 0) + SharedDB.safeNum(a.firstGMult, 0)) / kA + SharedDB.safeNum(a.firstGekirei, 0) * 0.1;
+            var copyValB = (SharedDB.safeNum(b.firstTMult, 0) + SharedDB.safeNum(b.firstGMult, 0)) / kB + SharedDB.safeNum(b.firstGekirei, 0) * 0.1;
             var scoreA = (a.effectiveCost - 1.0) * 10000 + copyValA;
             var scoreB = (b.effectiveCost - 1.0) * 10000 + copyValB;
             return scoreB - scoreA;
@@ -677,7 +725,7 @@ window.HokubatsuEngine = (function() {
             if (entry.inSolo && entry.soloSlot) {
                 var ss = entry.soloSlot;
                 var firstSoloG = SharedDB.safeNum(ss.firstGMult, 0) / kMult;
-                var firstSoloGk = SharedDB.safeNum(ss.firstGekirei, 0) / kMult;
+                var firstSoloGk = SharedDB.safeNum(ss.firstGekirei, 0);
                 impact += (450000 * (firstSoloG / 100)) + (firstSoloGk * 150);
                 if (ss.role === 'ACE') {
                     impact += 8000000;
@@ -718,7 +766,7 @@ window.HokubatsuEngine = (function() {
                     leadAddedStatsMap[uid].tBuff += (SharedDB.safeNum(ls.firstTMult, 0) / kMult) * rRate;
                     leadAddedStatsMap[uid].gBuff += (SharedDB.safeNum(ls.firstGMult, 0) / kMult) * rRate;
                     leadAddedStatsMap[uid].spdPct += (SharedDB.safeNum(ls.firstTroopSpeedPct || ls.firstSpeedPct, 0) / kMult) * rRate;
-                    leadAddedStatsMap[uid].gkAdd += Math.floor((SharedDB.safeNum(ls.firstGekirei, 0) / kMult) * rRate);
+                    leadAddedStatsMap[uid].gkAdd += Math.floor(SharedDB.safeNum(ls.firstGekirei, 0) * rRate);
                     leadAddedStatsMap[uid].rrAdd += Math.round((SharedDB.safeNum(ls.firstRairei, 0) / kMult) * rRate * 100) / 100;
                 }
             }
@@ -735,7 +783,7 @@ window.HokubatsuEngine = (function() {
                     soloAddedStatsMap[uid].tBuff += (SharedDB.safeNum(ss.firstTMult, 0) / kMult) * rRate;
                     soloAddedStatsMap[uid].gBuff += (SharedDB.safeNum(ss.firstGMult, 0) / kMult) * rRate;
                     soloAddedStatsMap[uid].spdPct += (SharedDB.safeNum(ss.firstSpeedPct, 0) / kMult) * rRate;
-                    soloAddedStatsMap[uid].gkAdd += Math.floor((SharedDB.safeNum(ss.firstGekirei, 0) / kMult) * rRate);
+                    soloAddedStatsMap[uid].gkAdd += Math.floor(SharedDB.safeNum(ss.firstGekirei, 0) * rRate);
                     soloAddedStatsMap[uid].rrAdd += Math.round((SharedDB.safeNum(ss.firstRairei, 0) / kMult) * rRate * 100) / 100;
                 }
             }
@@ -744,7 +792,7 @@ window.HokubatsuEngine = (function() {
         var priorityMasters = unifiedMasters.filter(function(e) { return e.bestRank <= 3; });
         var speedOnlyMasters = unifiedMasters.filter(function(e) { return e.bestRank === 4; });
 
-        // 【現在の副将のまま計算モード】主将の fukusho 配列から1回だけ加算（2重加算防止＆一般副将レアリティ倍率対応）
+        // 【現在の副将のまま計算モード】主将の fukusho 配列から1回だけ加算（2重加算防止＆帝仙鏡100%＆一般副将レアリティ倍率対応）
         if (!isReassignMode) {
             unifiedMasters.forEach(function(entry) {
                 var mCard = entry.card;
@@ -752,15 +800,17 @@ window.HokubatsuEngine = (function() {
                 var list = [];
                 mCard.fukusho.forEach(function(rawFk) {
                     var inf = SharedDB.getMirrorSkillInfo(rawFk);
+                    var isTeisenFk = isTeisenAdjutantObject(rawFk);
                     var st = SharedDB.getAdjutantStatusEffect(rawFk, inf);
-                    if (inf) {
-                        var rate = SharedDB.calcAdjutantEffectiveCopyRate(mCard, rawFk, inf);
+                    if (inf || isTeisenFk) {
+                        var rate = isTeisenFk ? 100 : SharedDB.calcAdjutantEffectiveCopyRate(mCard, rawFk, inf);
+                        var lbl = isTeisenFk ? ((st.isBu ? '[武]' : '') + '帝仙鏡 100% [主将C1化]') : formatMirrorLabelWithCost(inf, rate);
                         var wrapped = Object.assign({}, rawFk, {
                             copyRate: rate,
-                            label: formatMirrorLabelWithCost(inf, rate),
+                            label: lbl,
                             atkBonus: st.atkBonus,
                             spdBonus: st.spdBonus,
-                            info: inf
+                            info: inf || { type: 'senkyo', rate: 100 }
                         });
                         list.push(wrapped);
                         applyAdjutantToEntry(entry, wrapped);
@@ -880,7 +930,7 @@ window.HokubatsuEngine = (function() {
             var firstLeadT = ls ? (SharedDB.safeNum(ls.firstTMult, 0) / kMult) : 0;
             var firstLeadG = ls ? (SharedDB.safeNum(ls.firstGMult, 0) / kMult) : 0;
             var firstSoloG = ss ? (SharedDB.safeNum(ss.firstGMult, 0) / kMult) : 0;
-            var firstSoloGk = ss ? (SharedDB.safeNum(ss.firstGekirei, 0) / kMult) : 0;
+            var firstSoloGk = ss ? SharedDB.safeNum(ss.firstGekirei, 0) : 0;
 
             var wGenEff = 0;
             if (entry.inSolo) wGenEff += 4500;
@@ -1045,7 +1095,8 @@ window.HokubatsuEngine = (function() {
         setup.soloAceSummaries.forEach(function(s) {
             var ace = s.item;
             var adj = setup.unifiedAdj.soloAddedStatsMap[ace.card.uniqueId] || { gBuff: 0, spdPct: 0, atkBonus: 0, spdBonus: 0 };
-            var effAtk = SharedDB.safeNum(ace.card.baseAttack, 1000) + adj.atkBonus + setup.soloTotalGekirei;
+            var aceGk = (s.aceGekireiTotal !== undefined) ? s.aceGekireiTotal : setup.soloTotalGekirei;
+            var effAtk = SharedDB.safeNum(ace.card.baseAttack, 1000) + adj.atkBonus + aceGk;
             var totGenBuff = ace.evSolo.gMult + adj.gBuff + setup.soloSupportGenBuff + soloGo;
             s.effAtk = effAtk;
             s.totGenBuff = totGenBuff;
@@ -1082,11 +1133,77 @@ window.HokubatsuEngine = (function() {
             var allMirrorPool = unifiedPools.mirrorPool;
             var allGeneralPool = unifiedPools.generalPool;
 
+            // 「現在の副将のまま計算 (CURRENT)」時に、既に装着されている帝仙鏡(コスト1化)と副将バフ・速度を事前算出
+            var currentEffectiveCostMap = Object.create(null);
+            var currentHasTeisenMap = Object.create(null);
+            var preExistingLeadStatsMap = Object.create(null);
+            var preExistingSoloStatsMap = Object.create(null);
+
+            validCards.forEach(function(c) {
+                var baseC = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
+                if (!isReassign && cardHasEquippedTeisen(c) && baseC > 1.0 + 1e-6) {
+                    currentEffectiveCostMap[c.uniqueId] = 1.0;
+                    currentHasTeisenMap[c.uniqueId] = true;
+                } else {
+                    currentEffectiveCostMap[c.uniqueId] = baseC;
+                    currentHasTeisenMap[c.uniqueId] = false;
+                }
+
+                preExistingLeadStatsMap[c.uniqueId] = { tBuff: 0, gBuff: 0, spdPct: 0, atkBonus: 0 };
+                preExistingSoloStatsMap[c.uniqueId] = { gBuff: 0, spdPct: 0, gkAdd: 0, rrAdd: 0, atkBonus: 0 };
+
+                if (!isReassign && !SharedDB.isHaBusho(c) && Array.isArray(c.fukusho) && c.fukusho.length > 0) {
+                    var kMultC = getKakuseiMult(c);
+                    var evLeadC = evaluateCardHoku(c, primaryTroop, 'SL', 4.5, true, currentWeather);
+                    var evSoloC = evaluateCardHoku(c, null, 'SL', 4.5, true, currentWeather);
+                    var dummyEntry = {
+                        card: c,
+                        bestRank: (evLeadC.isAttackLead || evSoloC.isAttackLead) ? 1 : 2,
+                        inLead: true,
+                        inSolo: true,
+                        leadSlot: { role: evLeadC.isAttackLead ? 'ACE' : 'FRONT' },
+                        soloSlot: { role: evSoloC.isAttackLead ? 'ACE' : 'FRONT' }
+                    };
+
+                    c.fukusho.forEach(function(rawFk) {
+                        var inf = SharedDB.getMirrorSkillInfo(rawFk);
+                        var isTeisenFk = isTeisenAdjutantObject(rawFk);
+                        var st = SharedDB.getAdjutantStatusEffect(rawFk, inf);
+                        preExistingLeadStatsMap[c.uniqueId].atkBonus += SharedDB.safeNum(st.atkBonus, 0);
+                        preExistingSoloStatsMap[c.uniqueId].atkBonus += SharedDB.safeNum(st.atkBonus, 0);
+
+                        if (inf || isTeisenFk) {
+                            var rate = (isTeisenFk ? 100 : SharedDB.calcAdjutantEffectiveCopyRate(c, rawFk, inf)) / 100;
+                            preExistingLeadStatsMap[c.uniqueId].tBuff += (SharedDB.safeNum(evLeadC.firstTMult, 0) / kMultC) * rate;
+                            preExistingLeadStatsMap[c.uniqueId].gBuff += (SharedDB.safeNum(evLeadC.firstGMult, 0) / kMultC) * rate;
+                            preExistingLeadStatsMap[c.uniqueId].spdPct += (SharedDB.safeNum(evLeadC.firstTroopSpeedPct || evLeadC.firstSpeedPct, 0) / kMultC) * rate;
+
+                            preExistingSoloStatsMap[c.uniqueId].gBuff += (SharedDB.safeNum(evSoloC.firstGMult, 0) / kMultC) * rate;
+                            preExistingSoloStatsMap[c.uniqueId].spdPct += (SharedDB.safeNum(evSoloC.firstSpeedPct, 0) / kMultC) * rate;
+                            preExistingSoloStatsMap[c.uniqueId].gkAdd += Math.floor(SharedDB.safeNum(evSoloC.firstGekirei, 0) * rate);
+                            preExistingSoloStatsMap[c.uniqueId].rrAdd += Math.round((SharedDB.safeNum(evSoloC.firstRairei, 0) / kMultC) * rate * 100) / 100;
+                        } else {
+                            var gCand = buildGeneralAdjutantCandidateForMaster(rawFk, dummyEntry, primaryTroop, currentWeather);
+                            if (gCand && gCand.genStats) {
+                                preExistingLeadStatsMap[c.uniqueId].tBuff += SharedDB.safeNum(gCand.genStats.leadT, 0);
+                                preExistingLeadStatsMap[c.uniqueId].gBuff += SharedDB.safeNum(gCand.genStats.leadG, 0);
+                                preExistingLeadStatsMap[c.uniqueId].spdPct += SharedDB.safeNum(gCand.genStats.leadSpd, 0);
+
+                                preExistingSoloStatsMap[c.uniqueId].gBuff += SharedDB.safeNum(gCand.genStats.soloG, 0);
+                                preExistingSoloStatsMap[c.uniqueId].spdPct += SharedDB.safeNum(gCand.genStats.soloSpd, 0);
+                                preExistingSoloStatsMap[c.uniqueId].gkAdd += Math.floor(SharedDB.safeNum(gCand.genStats.soloGk, 0));
+                                preExistingSoloStatsMap[c.uniqueId].rrAdd += Math.round(SharedDB.safeNum(gCand.genStats.soloRr, 0) * 100) / 100;
+                            }
+                        }
+                    });
+                }
+            });
+
             var mirrorCount = allMirrorPool.length;
             var initSlCopyRatio = isReassign ? (mirrorCount >= 18 ? 1.55 : (mirrorCount >= 10 ? 1.15 : 0.65)) : 0;
             var initLCopyRatio = isReassign ? (mirrorCount >= 18 ? 0.65 : (mirrorCount >= 10 ? 0.45 : 0.25)) : 0;
 
-            var teisenMirrors = isReassign ? allMirrorPool.filter(function(m) { return m.info && m.info.type === 'senkyo'; }) : [];
+            var teisenMirrors = isReassign ? allMirrorPool.filter(isTeisenMirrorItem) : [];
 
             var dedupHokuPool = function(pool, usedIds, usedNos) {
                 var bestMap = Object.create(null);
@@ -1110,7 +1227,8 @@ window.HokubatsuEngine = (function() {
 
                 for (var i = 0; i < validCards.length; i++) {
                     var c = validCards[i];
-                    var cost = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
+                    var cost = currentEffectiveCostMap[c.uniqueId];
+                    var hasCurTeisen = Boolean(currentHasTeisenMap[c.uniqueId]);
                     var cRarity = String(c.rarity || 'SL').toUpperCase();
                     var hasAdjSlot = (!SharedDB.isHaBusho(c) && SharedDB.safeNum(c.maxFukushoCost, 0) > 0 && isReassign);
                     var estRatio = !hasAdjSlot ? 0 : (cRarity === 'SL' ? initSlCopyRatio : initLCopyRatio);
@@ -1120,10 +1238,15 @@ window.HokubatsuEngine = (function() {
                     var evHam = evaluateCardHoku(c, hammerTroop, 'SL', 4.5, true, currentWeather);
                     var evSel = (selectedTroopKey === 'HAMMER') ? evHam : evAxe;
 
+                    var curLeadAdj = !isReassign ? preExistingLeadStatsMap[c.uniqueId] : null;
+
                     if ((evAxe.isAttackLead || evHam.isAttackLead) && !evSel.isManualSupport && !evSel.isPassiveSupport) {
                         if (evAxe.tMult > 0 || evHam.tMult > 0) {
-                            var scoreAxe = axeTroop.attack * troopCount * (1 + evAxe.tMult / 100) + SharedDB.safeNum(c.baseAttack, 1000) * (1 + evAxe.gMult / 100);
-                            var scoreHam = hammerTroop.attack * troopCount * (1 + evHam.tMult / 100) + SharedDB.safeNum(c.baseAttack, 1000) * (1 + evHam.gMult / 100);
+                            var exLT = curLeadAdj ? curLeadAdj.tBuff : 0;
+                            var exLG = curLeadAdj ? curLeadAdj.gBuff : 0;
+                            var exLAtk = curLeadAdj ? curLeadAdj.atkBonus : 0;
+                            var scoreAxe = axeTroop.attack * troopCount * (1 + (evAxe.tMult + exLT) / 100) + (SharedDB.safeNum(c.baseAttack, 1000) + exLAtk) * (1 + (evAxe.gMult + exLG) / 100);
+                            var scoreHam = hammerTroop.attack * troopCount * (1 + (evHam.tMult + exLT) / 100) + (SharedDB.safeNum(c.baseAttack, 1000) + exLAtk) * (1 + (evHam.gMult + exLG) / 100);
                             var combinedScore = (selectedTroopKey === 'HAMMER')
                                 ? (scoreHam * 0.65 + scoreAxe * 0.35)
                                 : (scoreAxe * 0.65 + scoreHam * 0.35);
@@ -1135,6 +1258,7 @@ window.HokubatsuEngine = (function() {
                                 card: c,
                                 role: 'ACE',
                                 effectiveCost: cost,
+                                hasTeisenkyo: hasCurTeisen,
                                 evAxe: evAxe,
                                 evHam: evHam,
                                 evSel: evSel,
@@ -1159,6 +1283,8 @@ window.HokubatsuEngine = (function() {
                         var adjBonusL = 0;
                         if (leadAdjOverrideMap && leadAdjOverrideMap[c.uniqueId] !== undefined) {
                             adjBonusL = SharedDB.safeNum(leadAdjOverrideMap[c.uniqueId].tBuff, 0);
+                        } else if (!isReassign && curLeadAdj) {
+                            adjBonusL = curLeadAdj.tBuff;
                         } else if (hasAdjSlot) {
                             adjBonusL = (bestSupFirstT / kSelf) * estRatio;
                         }
@@ -1167,6 +1293,7 @@ window.HokubatsuEngine = (function() {
                             card: c,
                             effectiveCost: cost,
                             cost: cost,
+                            hasTeisenkyo: hasCurTeisen,
                             evAxe: evAxe,
                             evHam: evHam,
                             evSel: evSel,
@@ -1191,13 +1318,14 @@ window.HokubatsuEngine = (function() {
                     if (!evSel.isAttackLead && evSel.troopSpeedPct > 0) {
                         var adjSpdL = (leadAdjOverrideMap && leadAdjOverrideMap[c.uniqueId] !== undefined)
                             ? SharedDB.safeNum(leadAdjOverrideMap[c.uniqueId].spdPct, 0)
-                            : (hasAdjSlot ? (evSel.firstTroopSpeedPct / kSelf) * estRatio : 0);
+                            : (!isReassign && curLeadAdj ? curLeadAdj.spdPct : (hasAdjSlot ? (evSel.firstTroopSpeedPct / kSelf) * estRatio : 0));
 
                         leadSpeedPool.push({
                             card: c,
                             role: 'SPEED',
                             effectiveCost: cost,
                             cost: cost,
+                            hasTeisenkyo: hasCurTeisen,
                             evSel: evSel,
                             firstTMult: evSel.firstTMult,
                             firstGMult: evSel.firstGMult,
@@ -1261,21 +1389,26 @@ window.HokubatsuEngine = (function() {
 
                 for (var j = 0; j < validCards.length; j++) {
                     var sc = validCards[j];
-                    var sCost = SharedDB.safeNum(sc.originalCost !== undefined ? sc.originalCost : sc.cost, 4.5);
+                    var sCost = currentEffectiveCostMap[sc.uniqueId];
+                    var hasCurTeisenS = Boolean(currentHasTeisenMap[sc.uniqueId]);
                     var sRarity = String(sc.rarity || 'SL').toUpperCase();
                     var hasAdjSlotS = (!SharedDB.isHaBusho(sc) && SharedDB.safeNum(sc.maxFukushoCost, 0) > 0 && isReassign);
                     var estRatioS = !hasAdjSlotS ? 0 : (sRarity === 'SL' ? initSlCopyRatio : initLCopyRatio);
                     var kSelfS = getKakuseiMult(sc);
 
-                    var evSolo = evaluateCardHoku(sc, null, sRarity, 4.5, true, currentWeather);
+                    // 単騎サポート評価はエース標準（SL・4.5コスト）基準で評価（所持カードの超覇倍率はgetGekireiBonus内で自動反映）
+                    var evSolo = evaluateCardHoku(sc, null, 'SL', 4.5, true, currentWeather);
+                    var curSoloAdj = !isReassign ? preExistingSoloStatsMap[sc.uniqueId] : null;
 
                     if (evSolo.isAttackLead && !evSolo.isManualSupport && !evSolo.isPassiveSupport) {
-                        var baseAtk = SharedDB.safeNum(sc.baseAttack, 1000);
-                        var estSoloDmg = (baseAtk + estGekireiBase) * (1 + (estSupportMultBase + evSolo.gMult) / 100);
+                        var baseAtk = SharedDB.safeNum(sc.baseAttack, 1000) + (curSoloAdj ? curSoloAdj.atkBonus : 0);
+                        var exSG = curSoloAdj ? curSoloAdj.gBuff : 0;
+                        var estSoloDmg = (baseAtk + estGekireiBase) * (1 + (estSupportMultBase + evSolo.gMult + exSG) / 100);
                         var aceObj = {
                             card: sc,
                             role: 'ACE',
                             effectiveCost: sCost,
+                            hasTeisenkyo: hasCurTeisenS,
                             evSolo: evSolo,
                             firstTMult: 0,
                             firstGMult: evSolo.firstGMult,
@@ -1297,8 +1430,11 @@ window.HokubatsuEngine = (function() {
                         if (soloAdjOverrideMap && soloAdjOverrideMap[sc.uniqueId] !== undefined) {
                             adjGS = SharedDB.safeNum(soloAdjOverrideMap[sc.uniqueId].gBuff, 0);
                             adjGkS = SharedDB.safeNum(soloAdjOverrideMap[sc.uniqueId].gkAdd, 0);
+                        } else if (!isReassign && curSoloAdj) {
+                            adjGS = curSoloAdj.gBuff;
+                            adjGkS = curSoloAdj.gkAdd;
                         } else if (hasAdjSlotS) {
-                            if (evSolo.isGekirei) adjGkS = (evSolo.firstGekirei / kSelfS) * estRatioS;
+                            if (evSolo.isGekirei) adjGkS = evSolo.firstGekirei * estRatioS;
                             else adjGS = (evSolo.firstGMult / kSelfS) * estRatioS;
                         }
 
@@ -1307,6 +1443,7 @@ window.HokubatsuEngine = (function() {
                             card: sc,
                             effectiveCost: sCost,
                             cost: sCost,
+                            hasTeisenkyo: hasCurTeisenS,
                             evSolo: evSolo,
                             firstTMult: 0,
                             firstGMult: evSolo.firstGMult,
@@ -1331,6 +1468,9 @@ window.HokubatsuEngine = (function() {
                         if (soloAdjOverrideMap && soloAdjOverrideMap[sc.uniqueId] !== undefined) {
                             adjRrS = SharedDB.safeNum(soloAdjOverrideMap[sc.uniqueId].rrAdd, 0);
                             adjSpdS = SharedDB.safeNum(soloAdjOverrideMap[sc.uniqueId].spdPct, 0);
+                        } else if (!isReassign && curSoloAdj) {
+                            adjRrS = curSoloAdj.rrAdd;
+                            adjSpdS = curSoloAdj.spdPct;
                         } else if (hasAdjSlotS) {
                             if (evSolo.isRairei) adjRrS = (evSolo.firstRairei / kSelfS) * estRatioS;
                             else adjSpdS = (evSolo.firstSpeedPct / kSelfS) * estRatioS;
@@ -1341,6 +1481,7 @@ window.HokubatsuEngine = (function() {
                             role: 'SPEED',
                             effectiveCost: sCost,
                             cost: sCost,
+                            hasTeisenkyo: hasCurTeisenS,
                             evSolo: evSolo,
                             firstTMult: 0,
                             firstGMult: 0,
@@ -1596,7 +1737,7 @@ window.HokubatsuEngine = (function() {
                         var isAdj = (sn.indexOf('副:') === 0 || sn.indexOf('副変:') === 0 || sn.indexOf('副攻:') === 0 || sn.indexOf('副防:') === 0);
                         if ((isReassign || hasFukushoArr) && !isHa && isAdj) continue;
 
-                        var isMir = !isAdj && (sn.indexOf('変:') === 0 || sn.indexOf('主将の') !== -1 || sn.indexOf('明鑑') !== -1 || sn.indexOf('王春の') !== -1 || (sn.indexOf('明鏡') !== -1 && sn.indexOf('副将の') === -1));
+                        var isMir = !isAdj && (sn.indexOf('変:') === 0 || sn.indexOf('主将の') !== -1 || sn.indexOf('明鑑') !== -1 || sn.indexOf('王春の') !== -1 || (sn.indexOf('鏡') !== -1 && sn.indexOf('副将') === -1) || (sn.indexOf('鑑') !== -1 && sn.indexOf('副将') === -1));
                         var rri = HokubatsuDB.getRaireiSpeedBonus(sk, aceRarity);
                         if (isMir && (!rri || rri.addSpeed <= 0) && baseRr > 0) {
                             var rate = SharedDB.getMasterMirrorCopyRate(sk);
@@ -1624,15 +1765,66 @@ window.HokubatsuEngine = (function() {
                 return Math.round(sumRr * 100) / 100;
             };
 
+            // 受け手エースごとのレアリティ・元コストに応じた正確な檄令合計（超覇倍率込み）を算出
+            var calcGekireiForAce = function(aceRarity, aceOrigCost) {
+                var sumGk = 0;
+                pickedSoloFront.concat(pickedSoloBack).forEach(function(it) {
+                    var skills = (it.card && it.card.skills) || [];
+                    if (skills.length === 0) return;
+                    var gk0 = (!isDuelSkill(skills[0])) ? SharedDB.getGekireiBonus(skills[0], it.card, aceOrigCost, aceRarity) : { bonus: 0 };
+                    var baseGk = (gk0 && gk0.bonus) || 0;
+                    var cardGk = baseGk;
+                    var isHa = SharedDB.isHaBusho(it.card);
+                    var hasFukushoArr = Array.isArray(it.card.fukusho) && it.card.fukusho.length > 0;
+
+                    for (var k = 1; k < skills.length; k++) {
+                        var sk = skills[k];
+                        if (!sk) continue;
+                        var sn = String(sk.name || '').trim();
+                        if (sn.indexOf('覚:') === 0 || sn.indexOf('副覚:') === 0) continue;
+                        if (isDuelSkill(sk)) continue;
+                        var isAdj = (sn.indexOf('副:') === 0 || sn.indexOf('副変:') === 0 || sn.indexOf('副攻:') === 0 || sn.indexOf('副防:') === 0);
+                        if ((isReassign || hasFukushoArr) && !isHa && isAdj) continue;
+
+                        var isMir = !isAdj && (sn.indexOf('変:') === 0 || sn.indexOf('主将の') !== -1 || sn.indexOf('明鑑') !== -1 || sn.indexOf('王春の') !== -1 || (sn.indexOf('鏡') !== -1 && sn.indexOf('副将') === -1) || (sn.indexOf('鑑') !== -1 && sn.indexOf('副将') === -1));
+                        var gki = SharedDB.getGekireiBonus(sk, it.card, aceOrigCost, aceRarity);
+                        if (isMir && (!gki || gki.bonus <= 0) && baseGk > 0) {
+                            var rate = SharedDB.getMasterMirrorCopyRate(sk);
+                            cardGk += Math.floor(baseGk * rate);
+                        } else if (gki && gki.bonus > 0) {
+                            cardGk += gki.bonus;
+                        }
+                    }
+
+                    var assignedFks = unifiedAdj.assignedMap[it.card.uniqueId] || [];
+                    assignedFks.forEach(function(fk) {
+                        if (fk.isGeneralSkill && fk.genStats && SharedDB.safeNum(fk.genStats.soloGk, 0) > 0) {
+                            cardGk += SharedDB.safeNum(fk.genStats.soloGk, 0);
+                            return;
+                        }
+                        var inf = fk.info || SharedDB.getMirrorSkillInfo(fk);
+                        if (inf && baseGk > 0 && SharedDB.safeNum(fk.copyRate, 0) > 0) {
+                            cardGk += Math.floor(baseGk * (SharedDB.safeNum(fk.copyRate, 0) / 100));
+                        }
+                    });
+
+                    sumGk += cardGk;
+                });
+                return Math.floor(sumGk);
+            };
+
             var slRaireiTotal = calcRaireiForAce('SL');
 
             var soloAceSummaries = pickedSoloAces.map(function(ace) {
                 var adj = unifiedAdj.soloAddedStatsMap[ace.card.uniqueId] || { gBuff: 0, spdPct: 0, atkBonus: 0, spdBonus: 0 };
-                var effAtk = SharedDB.safeNum(ace.card.baseAttack, 1000) + adj.atkBonus + soloTotalGekirei;
+                var aceRarity = String(ace.card.rarity || 'SL').toUpperCase();
+                var aceOrigCost = SharedDB.safeNum(ace.card.originalCost !== undefined ? ace.card.originalCost : ace.card.cost, 4.5);
+                var aceGkTotal = calcGekireiForAce(aceRarity, aceOrigCost);
+
+                var effAtk = SharedDB.safeNum(ace.card.baseAttack, 1000) + adj.atkBonus + aceGkTotal;
                 var totGenBuff = ace.evSolo.gMult + adj.gBuff + soloSupportGenBuff + soloGo;
                 var finalDmg = Math.floor(effAtk * (1 + totGenBuff / 100) * buff10Mult);
 
-                var aceRarity = String(ace.card.rarity || 'SL').toUpperCase();
                 var aceRaireiAdd = calcRaireiForAce(aceRarity);
                 var baseSpd = SharedDB.safeNum(ace.card.speed, 15);
 
@@ -1642,6 +1834,7 @@ window.HokubatsuEngine = (function() {
 
                 return {
                     item: ace,
+                    aceGekireiTotal: aceGkTotal,
                     effAtk: effAtk,
                     totGenBuff: totGenBuff,
                     finalDmg: finalDmg,
@@ -1691,7 +1884,7 @@ window.HokubatsuEngine = (function() {
 
             currentHokuSetup = setup;
             render(setup);
-            AppCards.setStatusLog("北伐統合最適化完了（Ver. 2.06 ／ 天候[" + wMeta.label + "]・副将分離評価済）");
+            AppCards.setStatusLog("北伐統合最適化完了（Ver. 2.07h ／ 天候[" + wMeta.label + "]・副将分離評価済）");
         } catch (err) {
             console.error("HokubatsuEngine.run Error:", err);
             AppCards.setStatusLog("北伐計算エラー: " + err.message, true);
@@ -1816,7 +2009,7 @@ window.HokubatsuEngine = (function() {
                         <span class="text-[10px] text-cyan-300 font-mono">速 ${s.finalTroopSpeed}</span>
                     </div>
                     <div class="hover:z-40 relative">
-                        ${SharedUI.getCardVisualHTML(s.item.card, adjList)}
+                        ${SharedUI.getCardVisualHTML(getDisplayCardHoku(s.item), adjList)}
                     </div>
                     <div class="mt-2 pt-1.5 border-t border-gray-800 font-mono text-[10px] space-y-1">
                         <div class="flex justify-between items-center bg-orange-950/50 px-1.5 py-0.5 rounded border border-orange-500/30">
@@ -1845,7 +2038,7 @@ window.HokubatsuEngine = (function() {
                         <span class="text-[10px] text-cyan-300 font-mono font-bold">速度 ${s.finalSoloSpeed}</span>
                     </div>
                     <div class="hover:z-40 relative">
-                        ${SharedUI.getCardVisualHTML(s.item.card, adjList)}
+                        ${SharedUI.getCardVisualHTML(getDisplayCardHoku(s.item), adjList)}
                     </div>
                     <div class="mt-2 pt-1.5 border-t border-gray-800 font-mono text-[10px] space-y-1">
                         <div class="flex justify-between items-center bg-red-950/50 px-1.5 py-0.5 rounded border border-red-500/30">
@@ -2067,7 +2260,7 @@ window.HokubatsuEngine = (function() {
         area.className = "space-y-6 animate-flash";
         area.innerHTML = `
             <div class="bg-purple-950/30 border border-purple-500/40 rounded-xl px-4 py-3 text-xs text-purple-200 flex flex-wrap items-center justify-between gap-2">
-                <span><i class="fa-solid fa-link text-purple-400 mr-1.5"></i><b>北伐統合エンジン (Ver. 2.06)：</b>既存副将の分離評価（2重加算防止）・速度陣副将速度限定・一般副将レアリティ倍率・天候判定完全対応を適用しています。</span>
+                <span><i class="fa-solid fa-link text-purple-400 mr-1.5"></i><b>北伐統合エンジン (Ver. 2.07h)：</b>主将コピースキル(檄令非覚醒除算)・龍神/亀神/獣神/鬼神/天帝檄令＆覇超覇(supremacyLevel)補正・既存副将DP事前反映・速度陣副将速度限定・一般副将レアリティ倍率・天候判定完全対応を適用しています。</span>
                 <span class="font-mono text-amber-300 font-bold">エース・前衛・後衛使用: ${setup.unifiedAdj.frontBackUsedCount}枚 ／ 速度陣への余り配置: ${setup.unifiedAdj.speedLeftoverUsedCount}枚</span>
             </div>
             ${envControlBarHTML}
