@@ -1,6 +1,6 @@
 // ========================================================
-// 【兵士防御計算エンジン】js/engine-def.js (Ver. 2.08)
-// 役割：拠点防衛・南蛮太守5枠最適化、主将コピースキル(skills[0]基準・檄令非覚醒除算修正)、龍神/亀神/獣神/鬼神/天帝檄令＆覇超覇(supremacyLevel)補正対応、2拠点同時DP最適配分、「現在の副将のまま計算」時の帝仙鏡(コスト1化)＆既存副将バフ事前反映、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）、警護デッキ副将の「警悟」限定制限、既存副将2重加算防止＆天候判定完全対応
+// 【兵士防御計算エンジン】js/engine-def.js (Ver. 2.09)
+// 役割：拠点防衛・南蛮太守5枠最適化、防御アクティブスキル(四神の大聖郭等)は内政官枠(h0〜h1/k0〜k8)のみに配置しパッシブデッキ枠(pickedHPassives/pickedKPassives)には混入させない厳密分離、南蛮太守はパッシブ防御のみ厳密選出、同一デッキ/同一勢力(覇＝全勢力扱い含む)対応、「自拠点の全兵/自拠点の全ての兵/全拠点」等の明示がない防御バフはその拠点のみ有効、主将コピースキル・檄令＆覇超覇補正・2パス/2拠点DP・副将覚醒無効化対応
 // ========================================================
 window.DefEngine = (function() {
     var isDefBuff10 = false;
@@ -138,8 +138,8 @@ window.DefEngine = (function() {
 
             var hasTarget = (c.indexOf(targetStat) !== -1) || (c.indexOf('効果') !== -1) || (c.indexOf('威力') !== -1);
             var hasOtherStat = /(?:移動速度|移速|討伐ゲージ|経験値|資源|知力)/.test(c) ||
-                               (targetStat === '防御' && c.indexOf('攻撃') !== -1 && c.indexOf('防御') === -1) ||
-                               (targetStat === '攻撃' && c.indexOf('防御') !== -1 && c.indexOf('攻撃') === -1);
+                               (targetStat === '攻撃' && c.indexOf('防御') !== -1 && c.indexOf('攻撃') === -1) ||
+                               (targetStat === '防御' && c.indexOf('攻撃') !== -1 && c.indexOf('防御') === -1);
             if (hasOtherStat && !hasTarget) continue;
 
             var reSpecific = new RegExp('(?:効果|威力|' + targetStat + '(?:力)?)[がはのを]?\\s*([0-9\\.]+)\\s*倍');
@@ -160,6 +160,18 @@ window.DefEngine = (function() {
     function floatVal(s) {
         var n = parseFloat(s);
         return isNaN(n) ? 0 : n;
+    }
+
+    // 「自拠点の全兵」「自拠点の全ての兵」「全拠点」等の全拠点対象明示があるかを判定
+    function isAllBasesDefenseDesc(normDesc) {
+        if (!normDesc) return false;
+        if (normDesc.indexOf('同一デッキ') !== -1 ||
+            normDesc.indexOf('セットした拠点') !== -1 ||
+            normDesc.indexOf('この武将をセットした拠点') !== -1 ||
+            normDesc.indexOf('所属拠点が同一') !== -1) {
+            return false;
+        }
+        return /(?:自拠点の?全(?:ての)?兵|全拠点|全ての拠点|すべての拠点)/.test(normDesc);
     }
 
     function parseDefSkill(skill, targetTroopData, weatherObj) {
@@ -183,20 +195,28 @@ window.DefEngine = (function() {
             return res;
         }
 
-        if (full.indexOf('自動で発動') !== -1 || full.indexOf('自動発動') !== -1 || full.indexOf('全滅時も発動') !== -1 || full.indexOf('パッシブ') !== -1) {
+        // 「自動で発動」「自動発動」「全滅時も発動」「パッシブ」等の明記がある場合のみパッシブ判定
+        var hasExplicitManual = /(?:スキル使用中|スキル発動時|発動すると|一定時間|勅令|襲令|斗魂令|号令|戦陣|極意)/.test(normDesc) &&
+                                normDesc.indexOf('自動で発動') === -1 && normDesc.indexOf('自動発動') === -1;
+
+        if (!hasExplicitManual && (
+            normDesc.indexOf('自動で発動') !== -1 ||
+            normDesc.indexOf('自動発動') !== -1 ||
+            normDesc.indexOf('全滅時も発動') !== -1 ||
+            normDesc.indexOf('パッシブ') !== -1
+        )) {
             res.isPassive = true;
         }
-        if (full.indexOf('警護デッキ') !== -1 || full.indexOf('警悟') !== -1) {
+        if (normDesc.indexOf('警護デッキ') !== -1 || name.indexOf('警悟') !== -1 || normDesc.indexOf('警悟') !== -1) {
             res.isGuardDeck = true;
-            res.isPassive = true;
+            if (normDesc.indexOf('自動で発動') !== -1 || normDesc.indexOf('自動発動') !== -1 || normDesc.indexOf('パッシブ') !== -1) {
+                res.isPassive = true;
+            }
         }
 
-        var hasBaseBind = (
-            normDesc.indexOf('セットした拠点') !== -1 ||
-            normDesc.indexOf('この武将をセットした拠点') !== -1 ||
-            normDesc.indexOf('所属拠点が同一') !== -1
-        );
-        res.mustBeSameBase = hasBaseBind;
+        // 「自拠点の全兵」「自拠点の全ての兵」「全拠点」等の記述がなければその拠点のみ有効(mustBeSameBase = true)
+        var isAllBases = isAllBasesDefenseDesc(normDesc);
+        res.mustBeSameBase = !isAllBases;
 
         if (name.indexOf('防:') === 0 || name.indexOf('副防:') === 0 || name.indexOf('攻防:') === 0 || name.indexOf('副攻防:') === 0 || name.indexOf('変:') === 0 || name.indexOf('副変:') === 0) {
             res.isDefSkill = true;
@@ -209,18 +229,22 @@ window.DefEngine = (function() {
             return res;
         }
 
-        if (name.indexOf('防:') === 0 && !res.isPassive) {
-            res.isManualNaisei = true;
-        }
-
         var wMult = calcWeatherMultSafe(normDesc, weatherObj, '防御');
 
         var mSameC = normDesc.match(/同一勢力\((魏|呉|蜀|他)\)の武将1枚につき([0-9\.]+)[%％]/);
         if (mSameC) {
             res.reqCountry = mSameC[1];
             res.perSameCountryMult = parseFloat(mSameC[2]) * wMult;
+            res.mustBeSameBase = true;
+            // 「自動で発動」等の明記がない場合はパッシブではなく内政官(h0〜h1/k0〜k8)使用時のみ有効
+            res.isManualNaisei = !res.isPassive;
             defSkillCache[cacheKey] = res;
             return res;
+        }
+
+        // パッシブ明記のない防御スキルは内政官(h0〜h1/k0〜k8)使用時のみ効果を発揮
+        if (!res.isPassive) {
+            res.isManualNaisei = true;
         }
 
         var mRed = normDesc.match(/受けるダメージを([0-9\.]+)[%％]軽減/);
@@ -291,8 +315,9 @@ window.DefEngine = (function() {
     // =========================================================================
     // 一般武将を副将にセットした時の第1スキル評価
     // ※副将のスキル効果はレアリティに応じて SL:80% / L:70% / UR:60% / SR:50% / R:40% で発動
+    // ※副将時は覚醒スキル（覚:）が無効化されるため、覚醒対象なら覚醒倍率（3〜4倍）で割り戻す
     // =========================================================================
-    function buildDefGeneralAdjutantCand(gCard, targetTroopData, weatherObj, isExactDefendedBaseSlot, isGuardMaster) {
+    function buildDefGeneralAdjutantCand(gCard, targetTroopData, weatherObj, isExactDefendedBaseSlot, isGuardMaster, targetMasterCost) {
         if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
         var skills = gCard.skills || [];
         if (skills.length === 0 || !skills[0]) return null;
@@ -310,8 +335,18 @@ window.DefEngine = (function() {
 
         if (!isExactDefendedBaseSlot && p0.mustBeSameBase) return null;
 
-        var tVal = SharedDB.safeNum(p0.tMult, 0) * adjRatio;
-        var gVal = SharedDB.safeNum(p0.gMult, 0) * adjRatio;
+        var rawTVal = SharedDB.safeNum(p0.tMult, 0);
+        var rawGVal = SharedDB.safeNum(p0.gMult, 0);
+
+        var awakeInfo = SharedDB.getAwakeningInfo(gCard);
+        if (awakeInfo.hasAwakening && awakeInfo.isFirstSkillTarget && awakeInfo.multiplier > 1.0) {
+            rawTVal = rawTVal / awakeInfo.multiplier;
+            rawGVal = rawGVal / awakeInfo.multiplier;
+        }
+
+        var costRatio = SharedDB.calcCostAdjustedRatio(s0, SharedDB.safeNum(gCard.cost, 4.5), SharedDB.safeNum(targetMasterCost, 4.5));
+        var tVal = rawTVal * adjRatio * costRatio;
+        var gVal = rawGVal * adjRatio * costRatio;
         if (tVal <= 0) return null;
 
         var cleanSName = sName.replace(/^(?:攻防|攻|防|変|副攻|副防|副変):/, '').replace(/LV[0-9]+$/i, '');
@@ -331,9 +366,12 @@ window.DefEngine = (function() {
 
     function evaluateCardDef(card, targetTroopData, weatherObj, excludeSubSkills) {
         var empty = {
-            tMult: 0, gMult: 0, firstTMult: 0, firstGMult: 0,
+            tMult: 0, gMult: 0,
+            passiveTMult: 0, passiveGMult: 0, passivePerCountryMult: 0, passiveDmgReduce: 0,
+            activeTMult: 0, activeGMult: 0, activePerCountryMult: 0, activeDmgReduce: 0,
+            firstTMult: 0, firstGMult: 0,
             perSameCountryMult: 0, reqCountry: null, dmgReduce: 0,
-            isManualNaisei: false, isPassive: false, isGuard: false, mustBeSameBase: true
+            isManualNaisei: false, hasManualNaisei: false, isPassive: false, isGuard: false, mustBeSameBase: true
         };
         var skills = (card && card.skills) || [];
         if (skills.length === 0) return empty;
@@ -341,14 +379,14 @@ window.DefEngine = (function() {
         var firstSkill = skills[0];
         var p0 = parseDefSkill(firstSkill, targetTroopData, weatherObj);
         if (!p0.isDefSkill) return empty;
-        var firstDesc = String(firstSkill.description || '').trim();
 
         var passiveTMult = 0, passiveGMult = 0;
         var passivePerCountry = 0, reqCountry = p0.reqCountry;
         var passiveDmgReduce = 0;
         var activeCandidates = [];
         var isGuardCard = p0.isGuardDeck;
-        var mustBeSameBaseCard = false;
+        var mustBeSameBaseCard = Boolean(p0.mustBeSameBase);
+        var hasAnyPassive = false;
         var isHa = SharedDB.isHaBusho(card);
         var hasFukushoArr = Array.isArray(card.fukusho) && card.fukusho.length > 0;
         var shouldStripAdjSkills = Boolean(excludeSubSkills || hasFukushoArr);
@@ -358,7 +396,6 @@ window.DefEngine = (function() {
             var s = skills[idx];
             if (!s || typeof s !== 'object') continue;
             var sName = String(s.name || '').trim();
-            var sDesc = String(s.description || '').trim();
 
             if (sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || sName.indexOf('覚醒') !== -1) continue;
             if (isDuelSkill(s)) continue;
@@ -389,6 +426,7 @@ window.DefEngine = (function() {
                     passiveGMult += parsed.gMult;
                     passivePerCountry += parsed.perSameCountryMult;
                 }
+                if (p0.isPassive) hasAnyPassive = true;
                 if (p0.mustBeSameBase || parsed.mustBeSameBase) mustBeSameBaseCard = true;
                 continue;
             }
@@ -398,6 +436,7 @@ window.DefEngine = (function() {
                 if (parsed.reqCountry) reqCountry = parsed.reqCountry;
                 if (parsed.isPassive || isFromAdj) {
                     if (!isFromAdj || parsed.isPassive) {
+                        hasAnyPassive = true;
                         passiveTMult += parsed.tMult;
                         passiveGMult += parsed.gMult;
                         passivePerCountry += parsed.perSameCountryMult;
@@ -412,9 +451,10 @@ window.DefEngine = (function() {
 
         var activeTMult = 0, activeGMult = 0;
         var activePerCountry = 0, activeDmgReduce = 0;
-        var isManualNaisei = false;
+        var hasManualNaisei = false;
 
         if (activeCandidates.length > 0) {
+            hasManualNaisei = true;
             if (isHa) {
                 for (var ai = 0; ai < activeCandidates.length; ai++) {
                     var ac = activeCandidates[ai];
@@ -422,7 +462,6 @@ window.DefEngine = (function() {
                     activeGMult += ac.gMult;
                     activePerCountry += ac.perSameCountryMult;
                     activeDmgReduce += ac.dmgReduce;
-                    if (ac.isManualNaisei) isManualNaisei = true;
                     if (ac.mustBeSameBase) mustBeSameBaseCard = true;
                 }
             } else {
@@ -436,7 +475,6 @@ window.DefEngine = (function() {
                 activeGMult = topAc.gMult;
                 activePerCountry = topAc.perSameCountryMult;
                 activeDmgReduce = topAc.dmgReduce;
-                isManualNaisei = Boolean(topAc.isManualNaisei);
                 if (topAc.mustBeSameBase) mustBeSameBaseCard = true;
             }
         }
@@ -451,13 +489,22 @@ window.DefEngine = (function() {
         return {
             tMult: tMultTotal,
             gMult: gMultTotal,
+            passiveTMult: passiveTMult,
+            passiveGMult: passiveGMult,
+            passivePerCountryMult: passivePerCountry,
+            passiveDmgReduce: passiveDmgReduce,
+            activeTMult: activeTMult,
+            activeGMult: activeGMult,
+            activePerCountryMult: activePerCountry,
+            activeDmgReduce: activeDmgReduce,
             firstTMult: p0.tMult,
             firstGMult: p0.gMult,
             perSameCountryMult: perCountryTotal,
             reqCountry: reqCountry,
             dmgReduce: dmgReduceTotal,
-            isManualNaisei: isManualNaisei,
-            isPassive: !isManualNaisei,
+            isManualNaisei: hasManualNaisei && !hasAnyPassive,
+            hasManualNaisei: hasManualNaisei,
+            isPassive: hasAnyPassive,
             isGuard: isGuardCard,
             mustBeSameBase: mustBeSameBaseCard
         };
@@ -479,6 +526,23 @@ window.DefEngine = (function() {
             }
         }
         return { bestWeather: bestW, eval: maxEval };
+    }
+
+    // 同一勢力(reqCountry)カウント（「覇」は全勢力扱いとして常にカウントに含める）
+    function countMatchingCountryCards(deckItems, reqCountry) {
+        if (!reqCountry || !Array.isArray(deckItems)) return 0;
+        var cnt = 0;
+        for (var i = 0; i < deckItems.length; i++) {
+            var it = deckItems[i];
+            var c = it && it.card;
+            if (!c) continue;
+            var cCountry = String(c.country || '').trim();
+            var isHa = SharedDB.isHaBusho(c) || (cCountry === '覇');
+            if (isHa || cCountry === reqCountry) {
+                cnt++;
+            }
+        }
+        return cnt;
     }
 
     function solveDeckKnapsackWithNaiseiLimits(costLimit, maxNaiseiSlots, maxBoundNaiseiSlots, candidates) {
@@ -663,9 +727,9 @@ window.DefEngine = (function() {
                     validCards.forEach(function(c) {
                         var dp = defProbeCache[c.uniqueId];
                         var ev = dp && dp.eval;
-                        if (ev && ev.isManualNaisei && ev.mustBeSameBase) {
+                        if (ev && ev.hasManualNaisei && ev.mustBeSameBase && !ev.isPassive) {
                             boundNaiseiOnlyIds.add(c.uniqueId);
-                            var bv = SharedDB.safeNum(ev.tMult, 0);
+                            var bv = SharedDB.safeNum(ev.activeTMult, 0) + SharedDB.safeNum(ev.activePerCountryMult, 0) * 4;
                             if (bv > bestBoundNaiseiVal) {
                                 bestBoundNaiseiVal = bv;
                                 bestBoundNaiseiId = c.uniqueId;
@@ -737,6 +801,7 @@ window.DefEngine = (function() {
                     var isGuardRoleC = Boolean(evC && evC.isGuard);
                     var kMultC = getDefKakuseiMult(c);
                     var firstTValC = SharedDB.safeNum(evC && evC.firstTMult, 0);
+                    var cOrigCost = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
 
                     c.fukusho.forEach(function(rawFk) {
                         var inf = SharedDB.getMirrorSkillInfo(rawFk);
@@ -745,7 +810,7 @@ window.DefEngine = (function() {
                             var rate = isTeisenFk ? 100 : SharedDB.calcAdjutantEffectiveCopyRate(c, rawFk, inf);
                             preExistingAdjTMap[c.uniqueId] += (firstTValC / kMultC) * (rate / 100);
                         } else {
-                            var gCand = buildDefGeneralAdjutantCand(rawFk, targetTroopData, 'SUN', true, isGuardRoleC);
+                            var gCand = buildDefGeneralAdjutantCand(rawFk, targetTroopData, 'SUN', true, isGuardRoleC, cOrigCost);
                             if (gCand) {
                                 preExistingAdjTMap[c.uniqueId] += SharedDB.safeNum(gCand.genTMult, 0);
                             }
@@ -758,6 +823,7 @@ window.DefEngine = (function() {
             var frontBoundPool = [];
             var guardBoundPool = [];
             var guardGlobalPool = [];
+            var nanbanPassivePool = [];
 
             for (var i = 0; i < validCards.length; i++) {
                 var c = validCards[i];
@@ -767,31 +833,88 @@ window.DefEngine = (function() {
                 if (!ev || (ev.tMult <= 0 && ev.perSameCountryMult <= 0 && ev.dmgReduce <= 0)) continue;
 
                 var effCost = effectiveCostMap[c.uniqueId];
-                var estValue = ev.tMult + (ev.perSameCountryMult * 4) + (ev.dmgReduce * 15) + (!isReassignMode ? SharedDB.safeNum(preExistingAdjTMap[c.uniqueId], 0) : 0);
-                var item = {
+                var pT = SharedDB.safeNum(ev.passiveTMult !== undefined ? ev.passiveTMult : (ev.isPassive ? ev.tMult : 0), 0);
+                var pG = SharedDB.safeNum(ev.passiveGMult !== undefined ? ev.passiveGMult : (ev.isPassive ? ev.gMult : 0), 0);
+                var pSame = SharedDB.safeNum(ev.passivePerCountryMult !== undefined ? ev.passivePerCountryMult : (ev.isPassive ? ev.perSameCountryMult : 0), 0);
+                var pRed = SharedDB.safeNum(ev.passiveDmgReduce !== undefined ? ev.passiveDmgReduce : (ev.isPassive ? ev.dmgReduce : 0), 0);
+
+                var aT = SharedDB.safeNum(ev.activeTMult, 0);
+                var aG = SharedDB.safeNum(ev.activeGMult, 0);
+                var aSame = SharedDB.safeNum(ev.activePerCountryMult, 0);
+                var aRed = SharedDB.safeNum(ev.activeDmgReduce, 0);
+
+                var baseItem = {
                     card: c,
                     effectiveCost: effCost,
                     cost: effCost,
-                    tMult: estValue,
-                    rawTMult: ev.tMult,
-                    rawGMult: ev.gMult,
                     firstTMult: ev.firstTMult,
                     firstGMult: ev.firstGMult,
                     perSameCountryMult: ev.perSameCountryMult,
                     reqCountry: ev.reqCountry,
                     dmgReduce: ev.dmgReduce,
                     isBound: ev.mustBeSameBase,
-                    isManualNaisei: ev.isManualNaisei,
+                    isPassive: ev.isPassive,
                     isGuard: ev.isGuard,
                     weather: bestEv.bestWeather
                 };
 
+                // 南蛮太守は防御系パッシブスキル（ev.isPassive && !ev.isGuard）のみ対象
+                if (ev.isPassive && !ev.isGuard && (pT > 0 || pSame > 0 || pRed > 0)) {
+                    var pVal = pT + (pSame * 4) + (pRed * 15) + (!isReassignMode ? SharedDB.safeNum(preExistingAdjTMap[c.uniqueId], 0) : 0);
+                    nanbanPassivePool.push(Object.assign({}, baseItem, {
+                        tMult: pVal,
+                        rawTMult: pT,
+                        rawGMult: pG,
+                        perSameCountryMult: pSame,
+                        dmgReduce: pRed,
+                        isManualNaisei: false
+                    }));
+                }
+
                 if (ev.isGuard) {
-                    if (ev.mustBeSameBase) guardBoundPool.push(item);
-                    else guardGlobalPool.push(item);
+                    var gVal = pT + (pSame * 4) + (pRed * 15) + (!isReassignMode ? SharedDB.safeNum(preExistingAdjTMap[c.uniqueId], 0) : 0);
+                    if (gVal > 0 || pSame > 0 || pRed > 0) {
+                        var gItem = Object.assign({}, baseItem, {
+                            tMult: gVal,
+                            rawTMult: pT,
+                            rawGMult: pG,
+                            perSameCountryMult: pSame,
+                            dmgReduce: pRed,
+                            isManualNaisei: false
+                        });
+                        if (ev.mustBeSameBase) guardBoundPool.push(gItem);
+                        else guardGlobalPool.push(gItem);
+                    }
                 } else {
-                    if (ev.mustBeSameBase) frontBoundPool.push(item);
-                    else frontGlobalPool.push(item);
+                    // パッシブ効果（「自動で発動」等）がある場合はパッシブ枠候補として追加
+                    if (ev.isPassive && (pT > 0 || pSame > 0 || pRed > 0)) {
+                        var pScore = pT + (pSame * 4) + (pRed * 15) + (!isReassignMode ? SharedDB.safeNum(preExistingAdjTMap[c.uniqueId], 0) : 0);
+                        var pItem = Object.assign({}, baseItem, {
+                            tMult: pScore,
+                            rawTMult: pT,
+                            rawGMult: pG,
+                            perSameCountryMult: pSame,
+                            dmgReduce: pRed,
+                            isManualNaisei: false
+                        });
+                        if (ev.mustBeSameBase) frontBoundPool.push(pItem);
+                        else frontGlobalPool.push(pItem);
+                    }
+
+                    // アクティブ防御スキル（内政官h0〜h1 / k0〜k8使用時のみ有効）がある場合は内政官枠候補として追加
+                    if (ev.hasManualNaisei && (aT > 0 || aSame > 0 || aRed > 0)) {
+                        var aScore = aT + (aSame * 4) + (aRed * 15) + (!isReassignMode ? SharedDB.safeNum(preExistingAdjTMap[c.uniqueId], 0) : 0);
+                        var aItem = Object.assign({}, baseItem, {
+                            tMult: aScore,
+                            rawTMult: aT,
+                            rawGMult: aG,
+                            perSameCountryMult: aSame,
+                            dmgReduce: aRed,
+                            isManualNaisei: true
+                        });
+                        if (ev.mustBeSameBase) frontBoundPool.push(aItem);
+                        else frontGlobalPool.push(aItem);
+                    }
                 }
             }
 
@@ -810,10 +933,7 @@ window.DefEngine = (function() {
             var pickedNanbanTaishu = [];
 
             if (isNanbanMode) {
-                var allPassiveForNanban = dedupByCardNo(
-                    frontBoundPool.concat(frontGlobalPool).filter(function(x) { return !x.isManualNaisei; }),
-                    usedNos
-                );
+                var allPassiveForNanban = dedupByCardNo(nanbanPassivePool, usedNos);
                 var expandedCap = honkyoLimit + kyotenLimit + 22.5;
                 var eliteSelection = SharedDB.solveKnapsackDP(expandedCap, allPassiveForNanban).picked;
                 if (!eliteSelection || eliteSelection.length === 0) {
@@ -855,37 +975,73 @@ window.DefEngine = (function() {
             var pickedHPassives = [];
             var pickedKPassives = [];
 
+            // パッシブ枠候補（isManualNaisei === false のみ）と内政官枠候補（isManualNaisei === true のみ）を明確に分離
+            var filterPassiveOnly = function(pool) {
+                return pool.filter(function(x) { return !x.isManualNaisei && x.isPassive; });
+            };
+            var filterNaiseiOnly = function(pool) {
+                return pool.filter(function(x) { return Boolean(x.isManualNaisei); });
+            };
+
             if (isHonkyoDef) {
-                var availGlobalsForK = dedupByCardNo(frontGlobalPool, usedNos);
-                var kPickedAll = solveDeckKnapsackWithNaiseiLimits(kyotenLimit, maxKyotenNaisei, 0, availGlobalsForK);
-                kPickedAll.forEach(function(it) {
+                // 1. 拠点＋：内政官枠(kManualSlots)とパッシブ枠(pickedKPassives)を分離して選出
+                var kNaiseiCands = dedupByCardNo(filterNaiseiOnly(frontGlobalPool), usedNos);
+                var kNaiseiPicked = maxKyotenNaisei > 0 ? solveDeckKnapsackWithNaiseiLimits(kyotenLimit, maxKyotenNaisei, 0, kNaiseiCands) : [];
+                kNaiseiPicked.forEach(function(it) {
                     usedNos.add(it.card.cardNo || it.card.uniqueId);
-                    if (it.isManualNaisei) kManualSlots.push(it);
-                    else pickedKPassives.push(it);
+                    kManualSlots.push(it);
+                });
+                var kUsedCost = kNaiseiPicked.reduce(function(s, x) { return s + x.effectiveCost; }, 0);
+                var kPassiveCands = dedupByCardNo(filterPassiveOnly(frontGlobalPool), usedNos);
+                var kPassivePicked = solveDeckKnapsackWithNaiseiLimits(Math.max(0, kyotenLimit - kUsedCost), 0, 0, kPassiveCands);
+                kPassivePicked.forEach(function(it) {
+                    usedNos.add(it.card.cardNo || it.card.uniqueId);
+                    pickedKPassives.push(it);
                 });
 
-                var availForH = dedupByCardNo(frontBoundPool.concat(frontGlobalPool), usedNos);
-                var hPickedAll = solveDeckKnapsackWithNaiseiLimits(honkyoLimit, maxHonkyoNaisei, Math.min(1, maxHonkyoNaisei), availForH);
-                hPickedAll.forEach(function(it) {
+                // 2. 本拠：内政官枠(hManualSlots)とパッシブ枠(pickedHPassives)を分離して選出
+                var hNaiseiCands = dedupByCardNo(filterNaiseiOnly(frontBoundPool.concat(frontGlobalPool)), usedNos);
+                var hNaiseiPicked = maxHonkyoNaisei > 0 ? solveDeckKnapsackWithNaiseiLimits(honkyoLimit, maxHonkyoNaisei, Math.min(1, maxHonkyoNaisei), hNaiseiCands) : [];
+                hNaiseiPicked.forEach(function(it) {
                     usedNos.add(it.card.cardNo || it.card.uniqueId);
-                    if (it.isManualNaisei) hManualSlots.push(it);
-                    else pickedHPassives.push(it);
+                    hManualSlots.push(it);
+                });
+                var hUsedCost = hNaiseiPicked.reduce(function(s, x) { return s + x.effectiveCost; }, 0);
+                var hPassiveCands = dedupByCardNo(filterPassiveOnly(frontBoundPool.concat(frontGlobalPool)), usedNos);
+                var hPassivePicked = solveDeckKnapsackWithNaiseiLimits(Math.max(0, honkyoLimit - hUsedCost), 0, 0, hPassiveCands);
+                hPassivePicked.forEach(function(it) {
+                    usedNos.add(it.card.cardNo || it.card.uniqueId);
+                    pickedHPassives.push(it);
                 });
             } else {
-                var availGlobalsForH = dedupByCardNo(frontGlobalPool, usedNos);
-                var hPickedAll2 = solveDeckKnapsackWithNaiseiLimits(honkyoLimit, maxHonkyoNaisei, 0, availGlobalsForH);
-                hPickedAll2.forEach(function(it) {
+                // 1. 本拠：内政官枠(hManualSlots)とパッシブ枠(pickedHPassives)を分離して選出
+                var hNaiseiCands2 = dedupByCardNo(filterNaiseiOnly(frontGlobalPool), usedNos);
+                var hNaiseiPicked2 = maxHonkyoNaisei > 0 ? solveDeckKnapsackWithNaiseiLimits(honkyoLimit, maxHonkyoNaisei, 0, hNaiseiCands2) : [];
+                hNaiseiPicked2.forEach(function(it) {
                     usedNos.add(it.card.cardNo || it.card.uniqueId);
-                    if (it.isManualNaisei) hManualSlots.push(it);
-                    else pickedHPassives.push(it);
+                    hManualSlots.push(it);
+                });
+                var hUsedCost2 = hNaiseiPicked2.reduce(function(s, x) { return s + x.effectiveCost; }, 0);
+                var hPassiveCands2 = dedupByCardNo(filterPassiveOnly(frontGlobalPool), usedNos);
+                var hPassivePicked2 = solveDeckKnapsackWithNaiseiLimits(Math.max(0, honkyoLimit - hUsedCost2), 0, 0, hPassiveCands2);
+                hPassivePicked2.forEach(function(it) {
+                    usedNos.add(it.card.cardNo || it.card.uniqueId);
+                    pickedHPassives.push(it);
                 });
 
-                var availForK = dedupByCardNo(frontBoundPool.concat(frontGlobalPool), usedNos);
-                var kPickedAll2 = solveDeckKnapsackWithNaiseiLimits(kyotenLimit, maxKyotenNaisei, Math.min(1, maxKyotenNaisei), availForK);
-                kPickedAll2.forEach(function(it) {
+                // 2. 拠点＋：内政官枠(kManualSlots)とパッシブ枠(pickedKPassives)を分離して選出
+                var kNaiseiCands2 = dedupByCardNo(filterNaiseiOnly(frontBoundPool.concat(frontGlobalPool)), usedNos);
+                var kNaiseiPicked2 = maxKyotenNaisei > 0 ? solveDeckKnapsackWithNaiseiLimits(kyotenLimit, maxKyotenNaisei, Math.min(1, maxKyotenNaisei), kNaiseiCands2) : [];
+                kNaiseiPicked2.forEach(function(it) {
                     usedNos.add(it.card.cardNo || it.card.uniqueId);
-                    if (it.isManualNaisei) kManualSlots.push(it);
-                    else pickedKPassives.push(it);
+                    kManualSlots.push(it);
+                });
+                var kUsedCost2 = kNaiseiPicked2.reduce(function(s, x) { return s + x.effectiveCost; }, 0);
+                var kPassiveCands2 = dedupByCardNo(filterPassiveOnly(frontBoundPool.concat(frontGlobalPool)), usedNos);
+                var kPassivePicked2 = solveDeckKnapsackWithNaiseiLimits(Math.max(0, kyotenLimit - kUsedCost2), 0, 0, kPassiveCands2);
+                kPassivePicked2.forEach(function(it) {
+                    usedNos.add(it.card.cardNo || it.card.uniqueId);
+                    pickedKPassives.push(it);
                 });
             }
 
@@ -935,12 +1091,13 @@ window.DefEngine = (function() {
                 var it = activeSlots[sId];
                 var curW = shouldAutoWeather ? it.weather : (AppCards.slotWeathers[sId] || it.weather || 'SUN');
                 var reEv = evaluateCardDef(it.card, targetTroopData, curW, true);
-                it.rawTMult = reEv.tMult;
-                it.rawGMult = reEv.gMult;
+                it.rawTMult = reEv.activeTMult;
+                it.rawGMult = reEv.activeGMult;
                 it.firstTMult = reEv.firstTMult;
                 it.firstGMult = reEv.firstGMult;
-                it.perSameCountryMult = reEv.perSameCountryMult;
-                it.dmgReduce = reEv.dmgReduce;
+                it.perSameCountryMult = reEv.activePerCountryMult;
+                it.reqCountry = reEv.reqCountry;
+                it.dmgReduce = reEv.activeDmgReduce;
                 it.isExactDefendedBaseSlot = isHonkyoDef ? (sId === 'h0') : (sId === 'k0');
                 it.isGuardMaster = false;
                 allActiveItems.push(it);
@@ -975,8 +1132,10 @@ window.DefEngine = (function() {
                 if (it.card && !SharedDB.isHaBusho(it.card) && SharedDB.safeNum(it.card.maxFukushoCost, 0) > 0) {
                     var kMult = getDefKakuseiMult(it.card);
                     var rWeight = (SharedDB.RARITY_ORDER[String(it.card.rarity || 'SL').toUpperCase()] || 1) * 10000000;
+                    var itOrigC = SharedDB.safeNum(it.card.originalCost !== undefined ? it.card.originalCost : it.card.cost, 4.5);
                     masterList.push({
                         card: it.card,
+                        targetMasterCost: itOrigC,
                         isExactDefendedBaseSlot: Boolean(it.isExactDefendedBaseSlot),
                         isGuardMaster: Boolean(it.isGuardMaster),
                         maxCost: SharedDB.safeNum(it.card.maxFukushoCost, 4.5),
@@ -1024,8 +1183,8 @@ window.DefEngine = (function() {
                             adjutantAddedTroopBuffMap[mCard.uniqueId] += addT;
                             adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
                         } else {
-                            // 一般武将が既存副将として付いている場合もレアリティ倍率（SL80/L70/UR60/SR50/R40）を適用
-                            var gCandEx = buildDefGeneralAdjutantCand(rawFk, targetTroopData, 'SUN', master.isExactDefendedBaseSlot, master.isGuardMaster);
+                            // 一般武将が既存副将として付いている場合もレアリティ倍率（SL80/L70/UR60/SR50/R40）＆覚醒割戻しを適用
+                            var gCandEx = buildDefGeneralAdjutantCand(rawFk, targetTroopData, 'SUN', master.isExactDefendedBaseSlot, master.isGuardMaster, master.targetMasterCost);
                             if (gCandEx) {
                                 var fkId2 = String(rawFk.uniqueId || rawFk.id || rawFk.cardNo || '');
                                 var fkNo2 = String(rawFk.cardNo || fkId2);
@@ -1037,7 +1196,9 @@ window.DefEngine = (function() {
                                 adjutantAddedTroopBuffMap[mCard.uniqueId] += gCandEx.genTMult;
                                 adjutantAddedGenBuffMap[mCard.uniqueId] += gCandEx.genGMult;
                             } else {
-                                existing.push(rawFk);
+                                existing.push(Object.assign({}, rawFk, {
+                                    label: rawFk.label || ((st.isBu ? '[武]' : st.isGo ? '[護]' : st.isEi ? '[鋭]' : '') + '一般副将')
+                                }));
                             }
                         }
                     });
@@ -1103,7 +1264,7 @@ window.DefEngine = (function() {
                         var gc = availableGeneralPool[gi];
                         var gcNo = gc.cardNo || gc.uniqueId;
                         if (usedMirrorIds.has(gc.uniqueId) || usedMirrorNos.has(gcNo)) continue;
-                        var gCand = buildDefGeneralAdjutantCand(gc, targetTroopData, 'SUN', master.isExactDefendedBaseSlot, master.isGuardMaster);
+                        var gCand = buildDefGeneralAdjutantCand(gc, targetTroopData, 'SUN', master.isExactDefendedBaseSlot, master.isGuardMaster, master.targetMasterCost);
                         if (gCand) validGenCands.push(gCand);
                     }
 
@@ -1141,12 +1302,8 @@ window.DefEngine = (function() {
                 });
             }
 
+            // 防衛対象拠点（本拠または拠点＋）に配置される武将一覧で同一勢力（覇＝全勢力扱い含む）をカウント
             var targetDeckItems = (isHonkyoDef ? hManualSlots.concat(pickedHPassives) : kManualSlots.concat(pickedKPassives)).concat(pickedNanbanTaishu);
-            var countryCounts = Object.create(null);
-            targetDeckItems.forEach(function(it) {
-                var cntry = it.card.country || '他';
-                countryCounts[cntry] = (countryCounts[cntry] || 0) + 1;
-            });
 
             var pureTroopMult = additionalAdjutantTroopBuff;
             var pureGenMult = additionalAdjutantGenBuff;
@@ -1156,7 +1313,7 @@ window.DefEngine = (function() {
                 pureTroopMult += SharedDB.safeNum(it.rawTMult, 0);
                 pureGenMult += SharedDB.safeNum(it.rawGMult, 0);
                 if (it.perSameCountryMult > 0 && it.reqCountry) {
-                    var sameCnt = countryCounts[it.reqCountry] || 0;
+                    var sameCnt = countMatchingCountryCards(targetDeckItems, it.reqCountry);
                     var bonusSame = it.perSameCountryMult * sameCnt;
                     pureTroopMult += bonusSame;
                     pureGenMult += bonusSame;
@@ -1228,7 +1385,7 @@ window.DefEngine = (function() {
             currentDefSetup = setup;
             render(setup);
             var modeTag = isNanbanMode ? ("南蛮モード・太守" + pickedNanbanTaishu.length + "枠 / 節約" + nanbanSavedCost.toFixed(1) + "C") : "通常防衛モード";
-            AppCards.setStatusLog("兵士防御最適化完了 (Ver. 2.07h / " + modeTag + "): 総合防御力 " + finalTotalDefense.toLocaleString());
+            AppCards.setStatusLog("兵士防御最適化完了 (Ver. 2.08f / " + modeTag + "): 総合防御力 " + finalTotalDefense.toLocaleString());
         } catch (err) {
             console.error("DefEngine.run Error:", err);
             AppCards.setStatusLog("兵士防御計算エラー: " + err.message, true);
@@ -1383,14 +1540,14 @@ window.DefEngine = (function() {
                     <div class="text-md font-bold text-white mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/30 pb-2">
                         <span class="flex items-center space-x-2">
                             <i class="fa-solid fa-crown text-amber-400"></i>
-                            <span>南蛮太守 配置（5枠 / 高コストパッシブ優先・コスト0消費・拠点縛り無視）</span>
+                            <span>南蛮太守 配置（5枠 / パッシブ防御のみ・コスト0消費・拠点縛り無視）</span>
                         </span>
                         <span class="text-xs font-mono bg-amber-500 text-black font-extrabold px-2.5 py-0.5 rounded shadow">
                             太守節約コスト: ${setup.nanbanSavedCost.toFixed(1)}C 分（実質タダ配置）
                         </span>
                     </div>
                     <div class="text-xs text-amber-200/80 mb-3">
-                        <i class="fa-solid fa-circle-info text-amber-400 mr-1"></i>コスト1.0等の軽量パッシブは表デッキに温存し、コストが重い（4.5C・4.0C等）強力パッシブ武将を優先的に太守5枠へ配置しています。
+                        <i class="fa-solid fa-circle-info text-amber-400 mr-1"></i>防御系パッシブスキルのみを対象に、コスト1.0等の軽量パッシブは表デッキへ温存しつつ、高コスト（4.5C・4.0C等）の強力パッシブ武将を太守5枠へ優先配置しています。
                     </div>
                     <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
                         ${taishuSlotsHTML}
@@ -1428,7 +1585,7 @@ window.DefEngine = (function() {
                 <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 border-b border-gray-800 pb-4 gap-4">
                     <div>
                         <div class="flex flex-wrap items-center gap-1.5 mb-2">
-                            <span class="bg-sky-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">兵士防御計算結果 (Ver. 2.07h)</span>
+                            <span class="bg-sky-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">兵士防御計算結果 (Ver. 2.08f)</span>
                             <span class="bg-gray-800 border border-gray-600 text-amber-300 text-[10px] font-bold px-2 py-0.5 rounded">有効内政枠: 本拠${setup.maxHonkyoNaisei} + 拠点${setup.maxKyotenNaisei}</span>
                             ${extraBadges}
                             <h3 class="text-lg font-bold text-white ml-1">【防衛拠点: <span class="${baseColor}">${baseLabel}</span>】</h3>

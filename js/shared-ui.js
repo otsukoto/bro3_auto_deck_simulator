@@ -1,6 +1,6 @@
 // ========================================================
-// 【共通UI描画モジュール】js/shared-ui.js (Ver. 2.00)
-// 役割：カードビジュアル描画、副将バッジ表示（一般副将・ミラー鏡・帝仙鏡）、スキル詳細ツールチップ生成
+// 【共通UI描画モジュール】js/shared-ui.js (Ver. 2.09)
+// 役割：カードビジュアル描画、副将バッジ表示（一般副将・ミラー鏡・帝仙鏡・SRオレンジ枠/R赤枠対応）、スキル詳細ツールチップ生成
 // ========================================================
 window.SharedUI = (function() {
     var imgLoadMode = 'AUTO';
@@ -521,6 +521,10 @@ window.SharedUI = (function() {
                             fkLabelBorderClass = 'border-blue-400/80';
                             fkPopupBorderClass = 'border-blue-400';
                         } else if (fkRarity === 'SR') {
+                            fkBorderClass = 'border-2 border-orange-500 hover:border-orange-300 hover:ring-2 hover:ring-orange-400 shadow-[0_0_8px_rgba(249,115,22,0.4)]';
+                            fkLabelBorderClass = 'border-orange-400/80';
+                            fkPopupBorderClass = 'border-orange-400';
+                        } else if (fkRarity === 'R') {
                             fkBorderClass = 'border-2 border-red-500 hover:border-rose-300 hover:ring-2 hover:ring-red-400 shadow-[0_0_8px_rgba(239,68,68,0.4)]';
                             fkLabelBorderClass = 'border-red-400/80';
                             fkPopupBorderClass = 'border-red-400';
@@ -795,7 +799,7 @@ window.SharedUI = (function() {
                     <button type="button" onclick="SharedUI.changePage(${page - 1}, ${isBottom})" ${page <= 1 ? 'disabled' : ''} class="px-2.5 py-1 rounded-md bg-gray-800 hover:bg-gray-700 text-xs font-bold text-white disabled:opacity-35 cursor-pointer">前へ</button>
                     ${numButtonsHTML}
                     <button type="button" onclick="SharedUI.changePage(${page + 1}, ${isBottom})" ${page >= totalPages ? 'disabled' : ''} class="px-2.5 py-1 rounded-md bg-gray-800 hover:bg-gray-700 text-xs font-bold text-white disabled:opacity-35 cursor-pointer">次へ</button>
-                    <button type="button" onclick="SharedUI.changePage(${totalPages}, ${isBottom})" ${page >= totalPages ? 'disabled' : ''} class="px-2 py-1 rounded-md bg-gray-800 hover:bg-gray-700 text-xs font-bold text-white disabled:opacity-35 cursor-pointer" title="最後のページ">&raquo;</button>
+                    <button type="button" onclick="SharedUI.changePage(${totalPages}, ${isBottom})" ${page >= totalPages ? 'disabled' : ''} class="px-2.5 py-1 rounded-md bg-gray-800 hover:bg-gray-700 text-xs font-bold text-white disabled:opacity-35 cursor-pointer" title="最後のページ">&raquo;</button>
                 </div>
             </div>
         `;

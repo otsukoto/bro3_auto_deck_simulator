@@ -1,6 +1,6 @@
 // ========================================================
-// 【共通データ・最適化基盤】js/shared-database.js (Ver. 2.08)
-// 役割：兵科・レアリティ定義、重複ゼロ保証副将プール構築、ナップサックDP、副将コンボ最適化（一般副将パッシブ＆拠点縛り判定対応）、檄令（天帝・龍神/鶴神/亀神/獣神/〇神檄令・鬼神の厳密判定＆LV1〜LV10スキルレベル倍率＆主将レアリティ・コスト基準）＆覇超覇(supremacyLevel)補正・覚醒倍率厳密判定対応
+// 【共通データ・最適化基盤】js/shared-database.js (Ver. 2.09)
+// 役割：兵科・レアリティ定義、兵科限定バフ判定(isGeneralCompatibleWithSkillText)、覚醒スキル対象・倍率解析(getAwakeningInfo)、重複ゼロ保証副将プール構築、ナップサックDP、副将コンボ最適化、檄令＆覇超覇(supremacyLevel)補正対応
 // ========================================================
 window.SharedDB = (function() {
     var GEKIREI_TABLES = {
@@ -124,7 +124,7 @@ window.SharedDB = (function() {
         if (desc.indexOf('コストにより大きく変動') !== -1) {
             return (cF * (cF + 1)) / (cM * (cM + 1));
         }
-        if (desc.indexOf('コストにより変動') !== -1) {
+        if (desc.indexOf('コストにより変動') !== -1 || desc.indexOf('コスト変動') !== -1) {
             return cF / cM;
         }
         return 1.0;
@@ -224,6 +224,51 @@ window.SharedDB = (function() {
         'DOUBLE': { key: 'DOUBLE', label: '双', raw: '双兵' },
         'HAMMER': { key: 'HAMMER', label: '錘', raw: '錘兵' }
     };
+
+    var SOLDIER_SKILL_KEYWORDS = [
+        { key: 'SPEAR',  words: ['槍兵科', '槍兵', '槍戟'] },
+        { key: 'BOW',    words: ['弓兵科', '弓兵', '弓神'] },
+        { key: 'CAV',    words: ['騎兵科', '騎兵', '戦蹄', '飛蹄'] },
+        { key: 'SWORD',  words: ['剣兵科', '剣兵', '歩兵科', '歩兵'] },
+        { key: 'AXE',    words: ['斧兵科', '斧兵', '戦斧兵', '戦斧'] },
+        { key: 'DOUBLE', words: ['双兵科', '双兵', '双剣兵', '双剣'] },
+        { key: 'HAMMER', words: ['錘兵科', '錘兵', '大錘兵', '大錘'] }
+    ];
+
+    // スキルテキストの武将対象が指定兵科（targetSoldierKey: 'DOUBLE', 'CAV' 等）に適合するか判定
+    // 例：「(斥候騎兵を除く)騎兵科の兵士・武将の攻撃力10440%」は CAV のみに適合し DOUBLE には不適合
+    function isGeneralCompatibleWithSkillText(normDesc, targetSoldierKey) {
+        if (!targetSoldierKey || !normDesc) return true;
+        var cleaned = String(normDesc)
+            .replace(/[\(（][^\)）]*を除く[\)）]/g, '')
+            .replace(/[^\s、。・]*?を除く/g, '');
+
+        if (cleaned.indexOf('全武将') !== -1 ||
+            cleaned.indexOf('全ての武将') !== -1 ||
+            cleaned.indexOf('すべての武将') !== -1 ||
+            cleaned.indexOf('全兵士') !== -1 ||
+            cleaned.indexOf('全ての兵士') !== -1 ||
+            cleaned.indexOf('すべての兵士') !== -1 ||
+            cleaned.indexOf('全軍') !== -1 ||
+            cleaned.indexOf('全兵科') !== -1 ||
+            cleaned.indexOf('全拠点') !== -1) {
+            return true;
+        }
+
+        var mentionedKeys = [];
+        for (var i = 0; i < SOLDIER_SKILL_KEYWORDS.length; i++) {
+            var entry = SOLDIER_SKILL_KEYWORDS[i];
+            for (var j = 0; j < entry.words.length; j++) {
+                if (cleaned.indexOf(entry.words[j]) !== -1) {
+                    mentionedKeys.push(entry.key);
+                    break;
+                }
+            }
+        }
+
+        if (mentionedKeys.length === 0) return true;
+        return mentionedKeys.indexOf(targetSoldierKey) !== -1;
+    }
 
     function parseExplicitSoldierString(str) {
         var s = String(str || '').trim();
@@ -422,23 +467,63 @@ window.SharedDB = (function() {
         return { bonus: finalBonus, series: seriesName, baseBonus: baseBonus, lvRatio: lvRatio, supremacyMult: supMult };
     }
 
-    function getKakuseiMultiplier(card) {
-        if (!card) return 1.0;
+    // =========================================================================
+    // 【覚醒スキル情報解析関数】
+    // 覚醒スキル（覚:...）から、覚醒対象スキル名（【〇〇を覚醒】）・倍率（LV1=3倍〜LV10=4倍）・第1スキル対象かを解析
+    // =========================================================================
+    function getAwakeningInfo(card) {
+        var empty = { hasAwakening: false, targetSkillName: '', multiplier: 1.0, isFirstSkillTarget: false };
+        if (!card || typeof card !== 'object') return empty;
         var rawSkills = card.skills || [];
         var skills = Array.isArray(rawSkills) ? rawSkills : Object.values(rawSkills);
+        if (skills.length === 0) return empty;
+
+        var firstName = String((skills[0] && skills[0].name) || '').trim();
+        var firstClean = firstName.replace(/^(?:攻防|攻|防|変|副攻|副防|副変|覚|副覚):/, '').trim();
+
         for (var i = 0; i < skills.length; i++) {
             var s = skills[i];
             if (!s) continue;
             var sName = String(s.name || '').trim();
             var sDesc = String(s.description || '').trim();
             if (sName.indexOf('覚:') === 0 || sName.indexOf('副覚:') === 0 || sName.indexOf('覚醒') !== -1) {
-                var mTarget = sDesc.match(/(?:スキル効果|効果)[をがは]?\s*([0-9\.]+)\s*倍/);
-                if (mTarget) return parseFloat(mTarget[1]);
-                var m = sDesc.match(/([0-9\.]+)\s*倍/);
-                return m ? parseFloat(m[1]) : 3.0;
+                var mTarget = sDesc.match(/【(.+?)を覚醒】/);
+                var targetRaw = mTarget ? mTarget[1].trim() : '';
+                var targetClean = targetRaw.replace(/^(?:攻防|攻|防|変|副攻|副防|副変):/, '').trim();
+
+                var mult = 3.0;
+                var mMult = sDesc.match(/(?:スキル効果|効果)[をがは]?\s*([0-9\.]+)\s*倍/);
+                if (!mMult) mMult = sDesc.match(/([0-9\.]+)\s*倍/);
+                if (mMult) {
+                    mult = parseFloat(mMult[1]) || 3.0;
+                } else {
+                    var mLv = (sName + ' ' + sDesc).match(/(?:LV|Lv|lv|ＬＶ|レベル)\s*([0-9]+)/);
+                    var lv = mLv ? Math.min(10, Math.max(1, parseInt(mLv[1], 10))) : 1;
+                    mult = Math.round((3.0 + (lv - 1) * 0.1) * 10) / 10;
+                }
+
+                var isFirst = false;
+                if (!targetClean) {
+                    isFirst = true;
+                } else if (firstClean && (firstClean === targetClean || firstClean.indexOf(targetClean) === 0 || targetClean.indexOf(firstClean) === 0)) {
+                    isFirst = true;
+                }
+
+                return {
+                    hasAwakening: true,
+                    targetSkillName: targetRaw,
+                    multiplier: mult,
+                    isFirstSkillTarget: isFirst
+                };
             }
         }
-        return 1.0;
+        return empty;
+    }
+
+    function getKakuseiMultiplier(card) {
+        var info = getAwakeningInfo(card);
+        if (!info.hasAwakening) return 1.0;
+        return info.isFirstSkillTarget ? info.multiplier : 1.0;
     }
 
     function getAdjutantStatusEffect(fkCard, mirrorInfo) {
@@ -965,12 +1050,14 @@ window.SharedDB = (function() {
         isHaBusho: isHaBusho,
         isMirrorCard: isMirrorCard,
         isFemaleOrOtherBusho: isFemaleOrOtherBusho,
+        isGeneralCompatibleWithSkillText: isGeneralCompatibleWithSkillText,
         getSupremacyMultiplier: getSupremacyMultiplier,
         getMasterMirrorCopyRate: getMasterMirrorCopyRate,
         calcCostAdjustedRatio: calcCostAdjustedRatio,
         calcAdjutantEffectiveCopyRate: calcAdjutantEffectiveCopyRate,
         getGeneralCoreNames: getGeneralCoreNames,
         getGekireiBonus: getGekireiBonus,
+        getAwakeningInfo: getAwakeningInfo,
         getKakuseiMultiplier: getKakuseiMultiplier,
         getAdjutantStatusEffect: getAdjutantStatusEffect,
         getMirrorSkillInfo: getMirrorSkillInfo,

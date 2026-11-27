@@ -1,6 +1,6 @@
 // ========================================================
-// 【引率火力計算エンジン】js/engine-lead.js (Ver. 2.08)
-// 役割：引率攻撃・破壊10枠最適化、主将コピースキル(skills[0]基準・SharedDB.getMasterMirrorCopyRate統一)、覇超覇(supremacyLevel)対応済みスキル評価、「現在の副将のまま計算」時の帝仙鏡(コスト1化)＆既存副将バフ事前反映、既存副将2重加算バグ修正、2パス反復2次元ナップサックDP、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）＆警護「警悟」限定・天候判定完全対応
+// 【引率火力計算エンジン】js/engine-lead.js (Ver. 2.09)
+// 役割：引率攻撃・破壊10枠最適化、武将兵科限定バフ判定(騎兵科/双兵科等)対応、副将覚醒無効化(覚:スキル割戻し)＆コスト変動対応、主将コピースキル(skills[0]基準・SharedDB.getMasterMirrorCopyRate統一)、覇超覇(supremacyLevel)対応済みスキル評価、「現在の副将のまま計算」事前反映、2パス反復2次元ナップサックDP、一般副将レアリティ倍率（SL80%/L70%/UR60%/SR50%/R40%）＆警護「警悟」限定・天候判定完全対応
 // ========================================================
 window.LeadEngine = (function() {
     var isLeadHighland = false;
@@ -203,8 +203,9 @@ window.LeadEngine = (function() {
 
         var leadCountry = leadCard ? (leadCard.country || '') : '';
         var isLeadHa = leadCard ? (SharedDB.isHaBusho(leadCard) || leadCountry === '覇') : false;
+        var leadSoldierKey = leadCard ? (leadCard.soldierKey || SharedDB.normalizeSoldierType(leadCard.soldierType, leadCard).key) : '';
 
-        var cacheKey = name + '\x01' + rawDesc + '\x01' + targetTroopData.name + '\x01' + weatherObj + '\x01' + mode + '\x01' + leadCountry + '\x01' + (isLeadHa ? '1' : '0');
+        var cacheKey = name + '\x01' + rawDesc + '\x01' + targetTroopData.name + '\x01' + weatherObj + '\x01' + mode + '\x01' + leadCountry + '\x01' + (isLeadHa ? '1' : '0') + '\x01' + leadSoldierKey;
         var cached = skillParseCache[cacheKey];
         if (cached) return cached;
 
@@ -300,19 +301,24 @@ window.LeadEngine = (function() {
             isTroopCompatible = false;
         }
 
+        // 武将側（leadCard）がスキルの兵科指定（「騎兵科の兵士・武将」等）に適合するかチェック
+        var isLeadGenCompatible = SharedDB.isGeneralCompatibleWithSkillText(normRawDesc, leadSoldierKey);
+
         var weatherMult = calcWeatherMultSafe(normRawDesc, weatherObj, '攻撃');
 
         var tMult = 0, gMult = 0;
         var matchAll = normRawDesc.match(RE_MATCH_ALL);
-        if (matchAll && isTroopCompatible) {
+        if (matchAll) {
             var matchedStr = matchAll[0];
             var hitWord = false;
             for (var wi1 = 0; wi1 < words.length; wi1++) {
                 if (matchedStr.indexOf(words[wi1]) !== -1) { hitWord = true; break; }
             }
-            if (hitWord) {
+            if (isTroopCompatible && hitWord) {
                 tMult = parseFloat(matchAll[1]);
-                gMult = tMult;
+            }
+            if (isLeadGenCompatible) {
+                gMult = parseFloat(matchAll[1]);
             }
         } else {
             if (isTroopCompatible) {
@@ -331,12 +337,14 @@ window.LeadEngine = (function() {
                     if (m_zen) tMult = parseFloat(m_zen[1]);
                 }
             }
-            var gMatch = normRawDesc.match(RE_GEN_ATK);
-            if (gMatch) gMult = parseFloat(gMatch[1]);
-            else if (tMult > 0 && normRawDesc.indexOf("全軍") !== -1) gMult = tMult;
-            else if (result.isLead && tMult === 0 && gMult === 0) {
-                var mSingle = normRawDesc.match(/攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速|知力|討伐ゲージ))*\s*[がをのは]?\s*([0-9\.]+)[%％]/);
-                if (mSingle) gMult = parseFloat(mSingle[1]);
+            if (isLeadGenCompatible) {
+                var gMatch = normRawDesc.match(RE_GEN_ATK);
+                if (gMatch) gMult = parseFloat(gMatch[1]);
+                else if (tMult > 0 && normRawDesc.indexOf("全軍") !== -1) gMult = tMult;
+                else if (result.isLead && tMult === 0 && gMult === 0) {
+                    var mSingle = normRawDesc.match(/攻撃(?:力)?(?:[と・、,\/](?:防御(?:力)?|移動速度|移速|知力|討伐ゲージ))*\s*[がをのは]?\s*([0-9\.]+)[%％]/);
+                    if (mSingle) gMult = parseFloat(mSingle[1]);
+                }
             }
         }
 
@@ -360,9 +368,10 @@ window.LeadEngine = (function() {
 
     // =========================================================================
     // 一般武将を副将にセットした時の第1スキル評価
-    // ※副将のスキル効果はレアリティに応じて SL:80% / L:70% / UR:60% / SR:50% / R:40% で発動
+    // 1. 副将時は覚醒無効（覚:）のため、覚醒対象スキルなら覚醒倍率（3〜4倍）で割り戻す
+    // 2. レアリティ別発動倍率（SL:80% / L:70% / UR:60% / SR:50% / R:40%）＋コスト変動比を適用
     // =========================================================================
-    function buildLeadGeneralAdjutantCand(gCard, masterRole, targetTroopData, weatherObj, leadCard, isSameBaseAsAce) {
+    function buildLeadGeneralAdjutantCand(gCard, masterRole, targetTroopData, weatherObj, leadCard, isSameBaseAsAce, targetMasterCost) {
         if (!gCard || SharedDB.isHaBusho(gCard) || SharedDB.isMirrorCard(gCard.name)) return null;
         var skills = gCard.skills || [];
         if (skills.length === 0 || !skills[0]) return null;
@@ -380,8 +389,19 @@ window.LeadEngine = (function() {
         if (masterRole === 'guard' && !p0.isGuardDeck) return null;
         if (!isSameBaseAsAce && p0.mustBeSameBase) return null;
 
-        var tVal = SharedDB.safeNum(p0.tMult, 0) * adjRatio;
-        var gVal = (masterRole === 'lead') ? (SharedDB.safeNum(p0.gMult, 0) * adjRatio) : 0;
+        var rawTVal = SharedDB.safeNum(p0.tMult, 0);
+        var rawGVal = (masterRole === 'lead') ? SharedDB.safeNum(p0.gMult, 0) : 0;
+
+        // 副将時は覚醒無効のため、第1スキルが覚醒対象なら覚醒倍率（3〜4倍）で割って素の値に戻す
+        var awakeInfo = SharedDB.getAwakeningInfo(gCard);
+        if (awakeInfo.hasAwakening && awakeInfo.isFirstSkillTarget && awakeInfo.multiplier > 1.0) {
+            rawTVal = rawTVal / awakeInfo.multiplier;
+            rawGVal = rawGVal / awakeInfo.multiplier;
+        }
+
+        var costRatio = SharedDB.calcCostAdjustedRatio(s0, SharedDB.safeNum(gCard.cost, 4.5), SharedDB.safeNum(targetMasterCost, 4.5));
+        var tVal = rawTVal * adjRatio * costRatio;
+        var gVal = rawGVal * adjRatio * costRatio;
 
         if (masterRole !== 'lead' && tVal <= 0) return null;
         if (tVal <= 0 && gVal <= 0) return null;
@@ -898,6 +918,7 @@ window.LeadEngine = (function() {
                     var nEvC = spC && spC.naiseiEval;
                     var isGuardRoleC = Boolean(!isLeadRoleC && pEvC && pEvC.canBeGuardSlot);
                     var masterRoleC = isLeadRoleC ? 'lead' : (isGuardRoleC ? 'guard' : 'support');
+                    var cOrigCost = SharedDB.safeNum(c.originalCost !== undefined ? c.originalCost : c.cost, 4.5);
 
                     var kMultC = SharedDB.getKakuseiMultiplier(c);
                     var firstTValC = 0;
@@ -921,7 +942,7 @@ window.LeadEngine = (function() {
                             preExistingAdjTMap[c.uniqueId] += (firstTValC / kMultC) * (rate / 100);
                             preExistingAdjGMap[c.uniqueId] += (firstGValC / kMultC) * (rate / 100);
                         } else {
-                            var gCand = buildLeadGeneralAdjutantCand(rawFk, masterRoleC, targetTroopData, curRefW, null, true);
+                            var gCand = buildLeadGeneralAdjutantCand(rawFk, masterRoleC, targetTroopData, curRefW, isLeadRoleC ? c : null, true, cOrigCost);
                             if (gCand) {
                                 preExistingAdjTMap[c.uniqueId] += SharedDB.safeNum(gCand.genTMult, 0);
                                 preExistingAdjGMap[c.uniqueId] += SharedDB.safeNum(gCand.genGMult, 0);
@@ -1106,6 +1127,7 @@ window.LeadEngine = (function() {
                 var leadNo = leadCard.cardNo || leadCard.uniqueId;
                 var leadTMult = leadItem.tMult;
                 var leadGMult = leadItem.gMult;
+                var masterOrigCost = SharedDB.safeNum(leadCard.originalCost !== undefined ? leadCard.originalCost : leadCard.cost, 4.5);
 
                 var pools = getSupportPoolsForLead(leadCard);
                 var shureiPool = pools.shureiPool.filter(function(x) { return x.card.uniqueId !== leadCard.uniqueId && (x.card.cardNo || x.card.uniqueId) !== leadNo && x.tMult > 0; });
@@ -1201,7 +1223,7 @@ window.LeadEngine = (function() {
                                     kRes2.picked.forEach(function(x) {
                                         usedNos.add(x.card.cardNo || x.card.uniqueId);
                                         if (x.isManualNaisei) kManual.push(x);
-                                        else hPassives.push(x);
+                                        else kPassives.push(x);
                                     });
                                 }
                             } else {
@@ -1359,6 +1381,7 @@ window.LeadEngine = (function() {
                         var kMult = SharedDB.getKakuseiMultiplier(leadCard);
                         masterList.push({
                             role: 'lead', card: leadCard, isSameBaseAsAce: true,
+                            targetMasterCost: masterOrigCost,
                             maxCost: SharedDB.safeNum(leadCard.maxFukushoCost, 4.5),
                             baseCopyVal: leadItem.firstTMult / kMult,
                             baseCopyGenVal: leadItem.firstGMult / kMult,
@@ -1370,8 +1393,10 @@ window.LeadEngine = (function() {
                         if (it.card && !SharedDB.isHaBusho(it.card) && SharedDB.safeNum(it.card.maxFukushoCost, 0) > 0 && (it.firstTMult > 0 || preTeisenAssignedMap[it.card.uniqueId] || cardHasEquippedTeisen(it.card))) {
                             var kMult2 = SharedDB.getKakuseiMultiplier(it.card);
                             var isSameBaseSlot = isHonkyoAttack ? (sId.indexOf('h') === 0) : (sId.indexOf('k') === 0);
+                            var itOrigC = SharedDB.safeNum(it.card.originalCost !== undefined ? it.card.originalCost : it.card.cost, 4.5);
                             masterList.push({
                                 role: 'active', card: it.card, isSameBaseAsAce: isSameBaseSlot,
+                                targetMasterCost: itOrigC,
                                 maxCost: SharedDB.safeNum(it.card.maxFukushoCost, 4.5),
                                 baseCopyVal: SharedDB.safeNum(it.firstTMult, 0) / kMult2,
                                 baseCopyGenVal: 0,
@@ -1382,8 +1407,10 @@ window.LeadEngine = (function() {
                     bestLocalSetup.basePassives.forEach(function(p) {
                         if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && (p.firstTMult > 0 || preTeisenAssignedMap[p.card.uniqueId] || cardHasEquippedTeisen(p.card))) {
                             var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
+                            var pOrigC = SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5);
                             masterList.push({
                                 role: 'passive', card: p.card, isSameBaseAsAce: isHonkyoAttack,
+                                targetMasterCost: pOrigC,
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 baseCopyVal: SharedDB.safeNum(p.firstTMult, 0) / kMult3,
                                 baseCopyGenVal: 0,
@@ -1394,8 +1421,10 @@ window.LeadEngine = (function() {
                     bestLocalSetup.subPassives.forEach(function(p) {
                         if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && (p.firstTMult > 0 || preTeisenAssignedMap[p.card.uniqueId] || cardHasEquippedTeisen(p.card))) {
                             var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
+                            var pOrigC2 = SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5);
                             masterList.push({
                                 role: 'passive', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
+                                targetMasterCost: pOrigC2,
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 baseCopyVal: SharedDB.safeNum(p.firstTMult, 0) / kMult3,
                                 baseCopyGenVal: 0,
@@ -1406,8 +1435,10 @@ window.LeadEngine = (function() {
                     hGuardPicked.forEach(function(p) {
                         if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && (p.firstTMult > 0 || preTeisenAssignedMap[p.card.uniqueId] || cardHasEquippedTeisen(p.card))) {
                             var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
+                            var gOrigC = SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5);
                             masterList.push({
                                 role: 'guard', card: p.card, isSameBaseAsAce: isHonkyoAttack,
+                                targetMasterCost: gOrigC,
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 baseCopyVal: SharedDB.safeNum(p.firstTMult, 0) / kMult3,
                                 baseCopyGenVal: 0,
@@ -1418,8 +1449,10 @@ window.LeadEngine = (function() {
                     kGuardPicked.forEach(function(p) {
                         if (p.card && !SharedDB.isHaBusho(p.card) && SharedDB.safeNum(p.card.maxFukushoCost, 0) > 0 && (p.firstTMult > 0 || preTeisenAssignedMap[p.card.uniqueId] || cardHasEquippedTeisen(p.card))) {
                             var kMult3 = SharedDB.getKakuseiMultiplier(p.card);
+                            var gOrigC2 = SharedDB.safeNum(p.card.originalCost !== undefined ? p.card.originalCost : p.card.cost, 4.5);
                             masterList.push({
                                 role: 'guard', card: p.card, isSameBaseAsAce: !isHonkyoAttack,
+                                targetMasterCost: gOrigC2,
                                 maxCost: SharedDB.safeNum(p.card.maxFukushoCost, 4.5),
                                 baseCopyVal: SharedDB.safeNum(p.firstTMult, 0) / kMult3,
                                 baseCopyGenVal: 0,
@@ -1464,7 +1497,7 @@ window.LeadEngine = (function() {
                                     adjutantAddedBuffMap[mCard.uniqueId] += addB;
                                     adjutantAddedGenBuffMap[mCard.uniqueId] += addG;
                                 } else {
-                                    var gCandEx = buildLeadGeneralAdjutantCand(rawFk, master.role, targetTroopData, leadBestW, leadCard, master.isSameBaseAsAce);
+                                    var gCandEx = buildLeadGeneralAdjutantCand(rawFk, master.role, targetTroopData, leadBestW, leadCard, master.isSameBaseAsAce, master.targetMasterCost);
                                     if (gCandEx) {
                                         var fkId2 = String(rawFk.uniqueId || rawFk.id || rawFk.cardNo || '');
                                         var fkNo2 = String(rawFk.cardNo || fkId2);
@@ -1476,7 +1509,9 @@ window.LeadEngine = (function() {
                                         adjutantAddedBuffMap[mCard.uniqueId] += gCandEx.genTMult;
                                         adjutantAddedGenBuffMap[mCard.uniqueId] += gCandEx.genGMult;
                                     } else {
-                                        existing.push(rawFk);
+                                        existing.push(Object.assign({}, rawFk, {
+                                            label: rawFk.label || ((st.isBu ? '[武]' : st.isEi ? '[鋭]' : '') + '一般副将(効果なし)')
+                                        }));
                                     }
                                 }
                             });
@@ -1540,7 +1575,7 @@ window.LeadEngine = (function() {
                                 var gc = availableGeneralPool[gi];
                                 var gcNo = gc.cardNo || gc.uniqueId;
                                 if (usedMirrorIds.has(gc.uniqueId) || usedMirrorNos.has(gcNo)) continue;
-                                var gCand = buildLeadGeneralAdjutantCand(gc, master.role, targetTroopData, leadBestW, leadCard, master.isSameBaseAsAce);
+                                var gCand = buildLeadGeneralAdjutantCand(gc, master.role, targetTroopData, leadBestW, leadCard, master.isSameBaseAsAce, master.targetMasterCost);
                                 if (gCand) validGenCands.push(gCand);
                             }
 
@@ -1665,7 +1700,7 @@ window.LeadEngine = (function() {
             }
             currentLeadOptimizedSetup = bestSetup;
             render(bestSetup);
-            AppCards.setStatusLog("引率最適化完了 (Ver. 2.07h): 最大攻撃力 " + bestSetup.finalTotalDamage.toLocaleString());
+            AppCards.setStatusLog("引率最適化完了 (Ver. 2.08a): 最大攻撃力 " + bestSetup.finalTotalDamage.toLocaleString());
         } catch (err) {
             console.error("LeadEngine.run Error:", err);
             AppCards.setStatusLog("引率計算エラー: " + err.message, true);
@@ -1781,7 +1816,7 @@ window.LeadEngine = (function() {
                 <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 border-b border-gray-800 pb-4 gap-4">
                     <div>
                         <div class="flex flex-wrap items-center gap-1.5 mb-2">
-                            <span class="bg-amber-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">引率計算結果 (Ver. 2.07h)</span>
+                            <span class="bg-amber-600 text-white text-[10px] font-bold px-2 py-0.5 rounded shadow">引率計算結果 (Ver. 2.08a)</span>
                             ${extraBadges}
                             <h3 class="text-lg font-bold text-white ml-1">【出撃拠点: <span class="${originColor}">${originName}</span>】</h3>
                         </div>
