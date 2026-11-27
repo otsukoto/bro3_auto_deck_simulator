@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ブラウザ三国志 統合デッキシミュレータ Ver. 2.08 (単騎 ＆ 引率 ＆ 兵士防御 ＆ 北伐)</title>
+    <title>ブラウザ三国志 統合デッキシミュレータ Ver. 2.09 (単騎 ＆ 引率 ＆ 兵士防御 ＆ 北伐)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = { darkMode: 'class', theme: { extend: { colors: { sangoku: { gold: '#dfb248', dark: '#121318', cardBg: '#1c1e26', cardBorder: '#2e3240', sl: '#9333ea', l: '#fbbf24', ur: '#3b82f6', sr: '#f97316', r: '#ef4444', uc: '#06b6d4', c: '#eab308' } } } } }
@@ -56,7 +56,7 @@
                 <div>
                     <div class="flex items-center space-x-2">
                         <h1 class="text-xl font-bold tracking-wide text-sangoku-gold">ブラウザ三国志</h1>
-                        <span class="text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.5 rounded">Ver. 2.08</span>
+                        <span class="text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.5 rounded">Ver. 2.09</span>
                     </div>
                     <p class="text-xs text-gray-400">統合デッキ最適化シミュレータ (単騎 ＆ 引率 ＆ 兵士防御 ＆ 北伐)</p>
                 </div>
@@ -688,13 +688,13 @@
     </main>
 
     <!-- 8つの独立モジュールを順番に読み込み -->
-    <script src="js/shared-database.js?v=2.08"></script>
+    <script src="js/shared-database.js?v=2.09"></script>
     <script src="js/hokubatsu-database.js?v=2.00"></script>
-    <script src="js/shared-cards.js?v=2.08"></script>
-    <script src="js/shared-ui.js?v=2.00"></script>
-    <script src="js/engine-solo.js?v=2.08"></script>
-    <script src="js/engine-lead.js?v=2.08"></script>
-    <script src="js/engine-def.js?v=2.08"></script>
+    <script src="js/shared-cards.js?v=2.09"></script>
+    <script src="js/shared-ui.js?v=2.09"></script>
+    <script src="js/engine-solo.js?v=2.09"></script>
+    <script src="js/engine-lead.js?v=2.09"></script>
+    <script src="js/engine-def.js?v=2.09"></script>
     <script src="js/engine-hokubatsu.js?v=2.07"></script>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
